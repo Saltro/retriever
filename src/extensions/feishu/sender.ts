@@ -4,9 +4,11 @@ import type {
   AppConfig,
   FeishuExtensionConfig,
   OutboundReply,
+  RecentMessage,
   Sender,
   SenderConfig,
 } from '../../types.js';
+import { createTime, messageText } from './normalize.js';
 
 interface TenantTokenResponse {
   code?: number;
@@ -45,6 +47,17 @@ export class MockSender implements Sender {
     return { ok: true, mock: true };
   }
 
+  /** Reads `<outbox>.recent` so tests can script the chat's current message list. */
+  async recentMessages(): Promise<RecentMessage[]> {
+    const file = `${this.outbox}.recent`;
+    if (!fs.existsSync(file)) return [];
+    return fs
+      .readFileSync(file, 'utf8')
+      .split('\n')
+      .filter(Boolean)
+      .map((line) => JSON.parse(line) as RecentMessage);
+  }
+
   async addReaction(messageId: string, emojiType: string): Promise<{ ok: true; mock: true }> {
     const record = {
       messageId,
@@ -56,6 +69,15 @@ export class MockSender implements Sender {
     console.error(`[mock-reaction] message=${messageId} emoji=${emojiType}`);
     return { ok: true, mock: true };
   }
+}
+
+interface FeishuListedMessage {
+  message_id?: string;
+  msg_type?: string;
+  create_time?: string;
+  content?: unknown;
+  body?: { content?: string };
+  sender?: { id?: string; sender_type?: string };
 }
 
 export class FeishuSender implements Sender {
@@ -70,6 +92,43 @@ export class FeishuSender implements Sender {
 
   async addReaction(messageId: string, emojiType: string): Promise<FeishuApiResponse> {
     return this.withTokenRetry(() => this.addReactionWithToken(messageId, emojiType));
+  }
+
+  async recentMessages(chatId: string, limit: number): Promise<RecentMessage[]> {
+    return this.withTokenRetry(() => this.recentMessagesWithToken(chatId, limit));
+  }
+
+  private async recentMessagesWithToken(chatId: string, limit: number): Promise<RecentMessage[]> {
+    const token = await this.getTenantAccessToken();
+    const query = new URLSearchParams({
+      container_id_type: 'chat',
+      container_id: chatId,
+      sort_type: 'ByCreateTimeDesc',
+      page_size: String(Math.min(Math.max(limit, 1), 50)),
+    });
+    const response = await fetch(`${this.baseUrl()}/open-apis/im/v1/messages?${query}`, {
+      headers: { authorization: `Bearer ${token}` },
+    });
+    const body = (await response.json().catch(() => ({}))) as FeishuApiResponse;
+    if (!response.ok || body.code) {
+      throw new Error(
+        `Feishu message list failed http=${response.status} code=${body.code ?? 'unknown'} msg=${body.msg ?? response.statusText}`,
+      );
+    }
+    const items = (body.data as { items?: FeishuListedMessage[] } | undefined)?.items || [];
+    return items.flatMap((item) => {
+      const create = createTime(item);
+      if (!item.message_id || create === undefined) return [];
+      return [
+        {
+          messageId: item.message_id,
+          createTime: create,
+          text: messageText({ message_type: item.msg_type, content: item.body?.content }),
+          userId: item.sender?.id,
+          fromSelf: item.sender?.sender_type === 'app',
+        },
+      ];
+    });
   }
 
   private async sendWithToken(reply: OutboundReply): Promise<FeishuApiResponse> {

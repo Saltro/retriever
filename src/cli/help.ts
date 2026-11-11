@@ -1,3 +1,5 @@
+import { CHAT_REPLY_LIMIT } from './send.js';
+
 export interface CommandHelp {
   name: string;
   summary: string;
@@ -13,13 +15,20 @@ export interface CommandHelp {
 export const COMMANDS: CommandHelp[] = [
   {
     name: 'send',
-    summary: 'Deliver a message to the person on the current channel.',
-    usage: ['retriever send <text...>', 'retriever send --stdin'],
+    summary: 'Deliver a chat message to the person on the current channel.',
+    usage: [
+      'retriever send [--long] [--rebase|--force] <text...>',
+      'retriever send [--long] [--rebase|--force] --stdin',
+    ],
     notes: [
       'Bound to the current event; no chat id is needed.',
       'This is the only way a person sees your output.',
+      `Default limit is ${CHAT_REPLY_LIMIT} characters: split longer answers into a few sends, which reads more like a conversation.`,
+      '--long lifts the limit for code, markdown or a single long message.',
+      'If newer messages arrived while you were composing, the send is refused with their text: --rebase when the reply already accounts for them, --force when they do not affect it.',
     ],
-    output: 'Nothing on success. Exit code 1 when no destination is bound.',
+    output:
+      'Nothing on success. Exit code 2 when the text is over the limit, 3 when the reply is behind the conversation.',
   },
   {
     name: 'return',

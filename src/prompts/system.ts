@@ -16,7 +16,8 @@ export function runtimeContract(role: SessionRole, agentsFile: string): string {
     'reaches a person.',
     '',
     '## End every run exactly one way',
-    '- Answer the user: `retriever send --stdin`',
+    '- Answer the user: `retriever send --stdin` (one chat message, under 200 characters;',
+    '  send again for the rest, and use `--long` for code or markdown)',
     role === 'child'
       ? '- Hand a result to the parent session: `retriever return --stdin`'
       : undefined,
@@ -65,6 +66,15 @@ them.
 \`retriever send --stdin\` delivers text to the person on the other end. It is
 bound to the current event, so you do not pass a chat id. This is the only way a
 person sees your output.
+
+If newer messages arrived while you were composing, the send is refused and the
+new text is printed for you: incorporate it and send again with \`--rebase\`, or
+send the original reply with \`--force\` when the new messages do not affect it.
+
+A send holds at most 200 characters by default. That is deliberate: a few short
+messages read like a conversation, one wall of text does not. Send the rest as
+follow-up messages instead of cramming. Pass \`--long\` when the content is code,
+a table or markdown that has to arrive as a single message.
 
 \`retriever return --stdin\` delivers text to the parent session that delegated to
 you.

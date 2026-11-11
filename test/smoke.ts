@@ -13,7 +13,7 @@ import { normalizeInbound } from '../src/core/events.js';
 import { listParentNotifications } from '../src/core/sessions/callbacks.js';
 import { loadRegistry } from '../src/core/sessions/registry.js';
 import { readFeishuChatBinding } from '../src/core/state/binding.js';
-import { readCurrentContext } from '../src/core/state/context.js';
+import { readCurrentContext, writeCurrentContext } from '../src/core/state/context.js';
 import { normalizeFeishuInbound } from '../src/extensions/feishu/normalize.js';
 import { extractContextUsage, PiRpcRunner } from '../src/extensions/pi/runner.js';
 import type { AppConfig } from '../src/types.js';
@@ -261,6 +261,19 @@ assert.match(
   /A session that is already running rejects a new prompt/,
 );
 assert.match(cli(['help', 'nope']).stdout, /^Unknown command: nope/);
+const longReply = 'x'.repeat(201);
+const rawSend = (args: string[]) =>
+  spawnSync(process.execPath, [cliPath, ...args], {
+    cwd: repoRoot,
+    env: { ...process.env, RETRIEVER_CONFIG: configPath },
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+const oversize = rawSend(['send', longReply]);
+assert.equal(oversize.status, 2);
+assert.match(oversize.stderr, /exceeds the 200-character chat limit/);
+assert.match(oversize.stderr, /--long/);
+assert.equal(rawSend(['send', '--long', longReply]).status, 0);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
 fs.writeFileSync(
@@ -498,19 +511,46 @@ assert.equal(selectedMain.sessionId, 'target-s1');
 assert.match(cli(['sessions', 'list'], targetPath).stdout, /^target-s1\s+/m);
 daemon.stop();
 steerDaemon.stop();
+// A reply composed before newer messages arrived is refused, not sent.
+const stale = feishuMessage('evt-stale', 'om_stale', 'what about the cache');
+writeCurrentContext(config, stale);
+fs.writeFileSync(
+  `${outbox}.recent`,
+  [
+    { messageId: 'om_newer', createTime: 1_700_000_005_000, text: 'wait, check upstream first' },
+    { messageId: 'om_stale', createTime: 1_700_000_000_000, text: 'what about the cache' },
+  ]
+    .map((message) => JSON.stringify(message))
+    .join('\n'),
+);
+const staleSend = rawSend(['send', 'the cache looks fine']);
+assert.equal(staleSend.status, 3, staleSend.stderr);
+assert.match(staleSend.stderr, /not sent: 1 message\(s\) arrived after this turn started/);
+assert.match(staleSend.stderr, /wait, check upstream first/);
+assert.match(staleSend.stderr, /--rebase/);
+assert.equal(rawSend(['send', '--force', 'the cache looks fine']).status, 0);
+fs.unlinkSync(`${outbox}.recent`);
+assert.equal(rawSend(['send', 'no newer messages now']).status, 0);
+
 console.log('smoke ok', outbox);
 
-function feishuMessage(id: string, messageId: string, text: string) {
+function feishuMessage(
+  id: string,
+  messageId: string,
+  text: string,
+  createTime = 1_700_000_000_000,
+) {
   return normalizeFeishuInbound(
     {
       schema: '2.0',
       header: { event_id: id, event_type: 'im.message.receive_v1' },
       event: {
-        sender: { sender_id: { open_id: 'ou-test' } },
+        sender: { sender_id: { open_id: 'ou-test' }, sender_type: 'user' },
         message: {
           message_id: messageId,
           chat_id: 'oc-test',
           message_type: 'text',
+          create_time: String(createTime),
           content: JSON.stringify({ text }),
         },
       },

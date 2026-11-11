@@ -135,8 +135,10 @@ export class PersonalDaemon {
     console.error(`[daemon] prompt steer event=${event.id} text_chars=${event.text.length}`);
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
-    writeCurrentContext(this.config, event);
     const response = await this.runner.steer(this.promptFor(event));
+    // A queued steer is not yet part of what the agent is composing from, so the
+    // context anchor must stay on the older message and let send detect it.
+    if (response.disposition !== 'queued') writeCurrentContext(this.config, event);
     console.error(`[daemon] prompt steered event=${event.id} disposition=${response.disposition}`);
     this.runner
       .waitForSettled()

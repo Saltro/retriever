@@ -69,6 +69,8 @@ export interface InboundEvent {
   chatId: string;
   userId?: string;
   messageId?: string;
+  /** Platform creation time in epoch milliseconds, when the channel provides one. */
+  createTime?: number;
   text: string;
   /**
    * Set by producers whose event carries its own semantics (scheduled wake, child completion).
@@ -85,15 +87,29 @@ export interface OutboundReply {
   contextFooter?: string;
 }
 
+/** A recently received message, as the platform reports it. */
+export interface RecentMessage {
+  messageId: string;
+  /** Platform creation time in epoch milliseconds. */
+  createTime: number;
+  text: string;
+  userId?: string;
+  /** True when this account sent it, so it never counts as an unanswered message. */
+  fromSelf?: boolean;
+}
+
 export interface Sender {
   send(reply: OutboundReply): Promise<unknown>;
   addReaction?(messageId: string, emojiType: string): Promise<unknown>;
+  /** Newest messages in the chat, for detecting that a reply is behind the conversation. */
+  recentMessages?(chatId: string, limit: number): Promise<RecentMessage[]>;
 }
 
 export interface RuntimeContext {
   chatId: string;
   eventId: string;
   messageId?: string;
+  messageCreateTime?: number;
   source: string;
   kind: InboundEvent['kind'];
   textChars: number;

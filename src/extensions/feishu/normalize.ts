@@ -4,6 +4,7 @@ import type { InboundEvent } from '../../types.js';
 interface FeishuMessage {
   message_id?: string;
   message_type?: string;
+  create_time?: string;
   content?: unknown;
   chat_id?: string;
   open_chat_id?: string;
@@ -11,6 +12,7 @@ interface FeishuMessage {
 }
 
 interface FeishuSender {
+  sender_type?: string;
   sender_id?: {
     open_id?: string;
     user_id?: string;
@@ -48,6 +50,7 @@ export function normalizeFeishuInbound(raw: unknown, source: string): InboundEve
       chatId: message.chat_id || message.open_chat_id || message.chat_id_v2 || 'feishu-chat',
       userId: sender?.sender_id?.open_id || sender?.sender_id?.user_id,
       messageId: message.message_id,
+      createTime: createTime(message),
       text: messageText(message),
       raw,
     };
@@ -67,7 +70,13 @@ export function normalizeFeishuInbound(raw: unknown, source: string): InboundEve
   return normalizeInbound(raw, source);
 }
 
-function messageText(message: FeishuMessage): string {
+/** Feishu reports creation time as a millisecond string; other shapes are ignored. */
+export function createTime(message: { create_time?: string }): number | undefined {
+  const value = Number(message.create_time);
+  return Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+export function messageText(message: { message_type?: string; content?: unknown }): string {
   if (message.message_type === 'text' && typeof message.content === 'string') {
     try {
       const parsed = JSON.parse(message.content) as { text?: string };

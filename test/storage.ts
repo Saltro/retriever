@@ -195,7 +195,12 @@ if (worker) {
     assert.equal(getCron(legacy, 'legacy-cron').prompt, 'wake');
     assert.equal(readFeishuChatBinding(legacy)?.chatId, 'visible-fixed');
     assert.deepEqual(listParentNotifications(legacy), [legacyNotice]);
-    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 3);
+    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 4);
+    const contextColumns = getStateDb(legacy)
+      .prepare('PRAGMA table_info(current_context)')
+      .all()
+      .map((column) => column.name);
+    assert.ok(contextColumns.includes('messageCreateTime'));
     const freshColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(sessions)')
       .all()
@@ -243,6 +248,12 @@ if (worker) {
           scheduleValue TEXT NOT NULL, target TEXT NOT NULL, enabled INTEGER NOT NULL,
           status TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
           lastFiredAt TEXT, nextRunAt TEXT, lastError TEXT${version === 2 ? ', runId TEXT' : ''}
+        );
+        CREATE TABLE current_context (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1), chatId TEXT NOT NULL, eventId TEXT NOT NULL,
+          messageId TEXT, source TEXT NOT NULL, kind TEXT NOT NULL,
+          textChars INTEGER NOT NULL, startedAt TEXT NOT NULL,
+          sendCount INTEGER NOT NULL, lastSentAt TEXT, contextUsage TEXT, contextUsageSource TEXT
         ); PRAGMA user_version = ${version};`);
       const migrationParent = {
         sessionId: 'main',
@@ -306,8 +317,8 @@ if (worker) {
       const migratedDb = getStateDb(migration);
       assert.equal(
         migratedDb.prepare('PRAGMA user_version').get()?.user_version,
-        3,
-        `v${version} migrates to v3`,
+        4,
+        `v${version} migrates to v4`,
       );
       const migratedColumns = migratedDb
         .prepare('PRAGMA table_info(sessions)')
@@ -352,8 +363,8 @@ if (worker) {
       closeStateDb(migration);
       assert.equal(
         getStateDb(migration).prepare('PRAGMA user_version').get()?.user_version,
-        3,
-        'v3 schema reopens without repeated ALTER',
+        4,
+        'v4 schema reopens without repeated ALTER',
       );
       for (const value of [0, 1])
         assert.equal(getSession(migration, migratedIds[value]).autoReturn, Boolean(value));

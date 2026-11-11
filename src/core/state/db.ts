@@ -6,7 +6,7 @@ import type { RuntimeCronRecord } from '../cron/registry.js';
 import { normalizeRuntimeCron } from '../cron/registry.js';
 import { stateDbPath, stateDir } from './paths.js';
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 const connections = new Map<string, DatabaseSync>();
 type FieldKind = 'text' | 'number' | 'boolean' | 'json';
 export type StateFields = Record<string, FieldKind>;
@@ -69,6 +69,7 @@ export const contextFields: StateFields = {
   chatId: 'text',
   eventId: 'text',
   messageId: 'text',
+  messageCreateTime: 'number',
   source: 'text',
   kind: 'text',
   textChars: 'number',
@@ -137,6 +138,11 @@ export function getStateDb(config: AppConfig): DatabaseSync {
       if (version < 3) {
         db.exec(
           'ALTER TABLE sessions RENAME COLUMN notify TO autoReturn; PRAGMA user_version = 3;',
+        );
+      }
+      if (version < 4) {
+        db.exec(
+          'ALTER TABLE current_context ADD COLUMN messageCreateTime INTEGER; PRAGMA user_version = 4;',
         );
       }
       if (!db.prepare('SELECT value FROM state_meta WHERE key = ?').get('legacy-json-v1')) {

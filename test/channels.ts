@@ -10,6 +10,7 @@ import {
   createChannelAdapter,
   registerChannelAdapter,
 } from '../src/core/channels/registry.js';
+import { unreadMessages } from '../src/core/channels/staleness.js';
 import { PersonalDaemon } from '../src/core/daemon/daemon.js';
 import { normalizeInbound } from '../src/core/events.js';
 import {
@@ -290,4 +291,30 @@ const waitingText = waitingCallback === backlogIds[0] ? 'slow callback' : 'waiti
 assert.ok(resumedPrompts.some((prompt) => prompt.includes(waitingText)));
 assert.equal(listParentNotifications(backlogConfig).length, 0);
 resumedDaemon.stop();
+// Staleness: the anchor is the message current context was written for.
+const anchor = { messageId: 'om_2', messageCreateTime: 2000 };
+const recent = [
+  { messageId: 'om_3', createTime: 3000, text: 'newest' },
+  { messageId: 'om_2', createTime: 2000, text: 'anchor' },
+  { messageId: 'om_1', createTime: 1000, text: 'older' },
+  { messageId: 'om_bot', createTime: 4000, text: 'own reply', fromSelf: true },
+];
+assert.deepEqual(
+  unreadMessages(anchor, recent).map((message) => message.messageId),
+  ['om_3'],
+  'only messages newer than the anchor count',
+);
+assert.deepEqual(unreadMessages(anchor, recent.slice(1)), []);
+assert.deepEqual(
+  unreadMessages({ messageId: 'om_1', messageCreateTime: 2000 }, recent).map((m) => m.messageId),
+  ['om_3', 'om_2'],
+  'an equal timestamp from a different message counts as unread',
+);
+assert.deepEqual(
+  unreadMessages({ messageId: 'om_2' }, recent),
+  [],
+  'an unknown platform time disables the check instead of blocking every send',
+);
+assert.deepEqual(unreadMessages(anchor, []), []);
+
 console.log('channels ok');
