@@ -529,6 +529,10 @@ assert.match(staleSend.stderr, /not sent: 1 message\(s\) arrived after this turn
 assert.match(staleSend.stderr, /wait, check upstream first/);
 assert.match(staleSend.stderr, /--rebase/);
 assert.equal(rawSend(['send', '--force', 'the cache looks fine']).status, 0);
+// --force records that the newer messages are accounted for, so the next
+// message of the same reply is not refused for the same reason.
+assert.equal(rawSend(['send', 'and the second half of the answer']).status, 0);
+assert.equal(readCurrentContext(config).messageId, 'om_newer');
 fs.unlinkSync(`${outbox}.recent`);
 assert.equal(rawSend(['send', 'no newer messages now']).status, 0);
 

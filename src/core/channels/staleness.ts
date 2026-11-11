@@ -10,6 +10,16 @@ export const RECENT_MESSAGE_WINDOW = 20;
  * A tie on create time counts as behind: a false rejection is recoverable with
  * --force, a missed interruption is not.
  */
+/** Newest message the agent could be expected to have read. */
+export function newestUnreadAnchor(recent: RecentMessage[]): RecentMessage | undefined {
+  return recent
+    .filter((message) => !message.fromSelf)
+    .reduce<RecentMessage | undefined>(
+      (newest, message) => (!newest || message.createTime >= newest.createTime ? message : newest),
+      undefined,
+    );
+}
+
 export function unreadMessages(
   context: Pick<RuntimeContext, 'messageId' | 'messageCreateTime'>,
   recent: RecentMessage[],

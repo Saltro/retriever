@@ -80,6 +80,9 @@ interface FeishuListedMessage {
   sender?: { id?: string; sender_type?: string };
 }
 
+/** A hung connection must not hold up a reply; the caller falls back to sending. */
+const LIST_TIMEOUT_MS = 3000;
+
 export class FeishuSender implements Sender {
   private token: string | null = null;
   private tokenExpiresAt = 0;
@@ -108,6 +111,7 @@ export class FeishuSender implements Sender {
     });
     const response = await fetch(`${this.baseUrl()}/open-apis/im/v1/messages?${query}`, {
       headers: { authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
     });
     const body = (await response.json().catch(() => ({}))) as FeishuApiResponse;
     if (!response.ok || body.code) {
@@ -125,7 +129,10 @@ export class FeishuSender implements Sender {
           createTime: create,
           text: messageText({ message_type: item.msg_type, content: item.body?.content }),
           userId: item.sender?.id,
-          fromSelf: item.sender?.sender_type === 'app',
+          // Only this app's own messages are self; another bot can still interrupt.
+          fromSelf:
+            item.sender?.sender_type === 'app' &&
+            (!this.config.appId || item.sender.id === this.config.appId),
         },
       ];
     });

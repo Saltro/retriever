@@ -43,6 +43,18 @@ export function readCurrentContext(config: AppConfig): RuntimeContext {
   return decodeStateRow<RuntimeContext>(row, contextFields);
 }
 
+/** Moves only the staleness anchor forward; event identity and counters stay put. */
+export function advanceContextAnchor(
+  config: AppConfig,
+  reference: { messageId: string; messageCreateTime: number },
+): RuntimeContext {
+  const row = getStateDb(config)
+    .prepare(`UPDATE current_context SET messageId = ?, messageCreateTime = ?
+    WHERE singleton = 1 AND (messageCreateTime IS NULL OR messageCreateTime <= ?) RETURNING *`)
+    .get(reference.messageId, reference.messageCreateTime, reference.messageCreateTime);
+  return row ? decodeStateRow<RuntimeContext>(row, contextFields) : readCurrentContext(config);
+}
+
 export function recordContextSend(config: AppConfig, expectedEventId?: string): RuntimeContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET sendCount = sendCount + 1, lastSentAt = ?

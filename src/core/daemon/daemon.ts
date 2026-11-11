@@ -61,14 +61,16 @@ export class PersonalDaemon {
       console.error(`[daemon] duplicate skipped event=${event.id} key=${dedupeKey}`);
       return this.queue;
     }
-    // A running agent gets the message immediately; anything else queues in order.
-    if (this.runner.isRunning() && this.runner.capabilities.steer) {
-      this.steerActiveRun(event).catch((error) => {
+    // A user message interrupts the running turn; wakes and callbacks wait their turn.
+    if (event.kind === 'message' && this.runner.isRunning() && this.runner.capabilities.steer) {
+      this.steerActiveRun(event).catch(async (error) => {
         if (dedupeKey) this.seenInbound.delete(dedupeKey);
         console.error(
           `[daemon] steer failed event=${event.id}: ${error instanceof Error ? error.message : String(error)}`,
         );
-        this.enqueueImmediate(event, dedupeKey);
+        // The runner is still busy, so a plain enqueue would be rejected and lost.
+        await this.runner.waitForSettled().catch(() => undefined);
+        void this.enqueueImmediate(event, dedupeKey).catch(() => undefined);
       });
       return this.queue;
     }
@@ -101,8 +103,9 @@ export class PersonalDaemon {
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     const response = await this.runner.steer(this.promptFor(event));
-    // A queued steer is not yet part of what the agent is composing from, so the
-    // context anchor must stay on the older message and let send detect it.
+    // A queued steer is delivered before the next model call. Until then the agent may
+    // still be composing from the older message, so the anchor stays put and `send`
+    // refuses once; --rebase/--force then advances it.
     if (response.disposition !== 'queued') writeCurrentContext(this.config, event);
     console.error(`[daemon] prompt steered event=${event.id} disposition=${response.disposition}`);
     this.runner

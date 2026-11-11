@@ -1,8 +1,16 @@
 import { loadConfig } from '../config.js';
 import { createChannelAdapter } from '../core/channels/registry.js';
-import { RECENT_MESSAGE_WINDOW, unreadMessages } from '../core/channels/staleness.js';
+import {
+  newestUnreadAnchor,
+  RECENT_MESSAGE_WINDOW,
+  unreadMessages,
+} from '../core/channels/staleness.js';
 import { readFeishuChatBinding as readOutputBinding } from '../core/state/binding.js';
-import { readCurrentContext, recordContextSend } from '../core/state/context.js';
+import {
+  advanceContextAnchor,
+  readCurrentContext,
+  recordContextSend,
+} from '../core/state/context.js';
 import type { RecentMessage, RuntimeContext } from '../types.js';
 
 /** Long enough for a chat-style reply, short enough to keep the conversation readable. */
@@ -62,10 +70,8 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
     );
   const chatId = binding?.chatId || 'stdin';
   const context = tryReadCurrentContext(config);
-  if (context && !rebase && !force) {
-    const unread = await checkUnread(channel, chatId, context, command);
-    if (unread) return;
-  }
+  if (context)
+    await guardConversation(config, channel, chatId, context, { rebase, force }, command);
   await channel.sender.send({
     chatId,
     inReplyTo: context?.eventId || 'manual',
@@ -88,16 +94,21 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
   }
 }
 
-/** Rejects the send and prints the newer messages; returns true when it did. */
-async function checkUnread(
+/**
+ * Refuses a reply that is behind the conversation, or records that the newer
+ * messages are accounted for when the caller says so.
+ */
+async function guardConversation(
+  config: ReturnType<typeof loadConfig>,
   channel: ReturnType<typeof createChannelAdapter>,
   chatId: string,
   context: RuntimeContext,
+  flags: { rebase: boolean; force: boolean },
   command: string,
-): Promise<boolean> {
+): Promise<void> {
   const list = channel.sender.recentMessages;
   // The check depends on platform ordering; without it, sending must still work.
-  if (!list || context.messageCreateTime === undefined) return false;
+  if (!list || context.messageCreateTime === undefined) return;
   let recent: RecentMessage[];
   try {
     recent = await list.call(channel.sender, chatId, RECENT_MESSAGE_WINDOW);
@@ -105,10 +116,19 @@ async function checkUnread(
     console.error(
       `[${command}] staleness check skipped: ${error instanceof Error ? error.message : String(error)}`,
     );
-    return false;
+    return;
   }
   const unread = unreadMessages(context, recent);
-  if (!unread.length) return false;
+  if (!unread.length) return;
+  if (flags.rebase || flags.force) {
+    const newest = newestUnreadAnchor(unread);
+    if (newest)
+      advanceContextAnchor(config, {
+        messageId: newest.messageId,
+        messageCreateTime: newest.createTime,
+      });
+    return;
+  }
   const lines = unread
     .sort((a, b) => a.createTime - b.createTime)
     .map((message) => {
