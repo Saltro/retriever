@@ -85,7 +85,7 @@ assert.equal(localStamp(nextCronDate('0 9 1 * 1', new Date(2026, 9, 2))), '2026-
 assert.equal(nextCronDate('0 0 * 13 *'), null);
 assert.equal(nextCronDate('0-10 * * * *'), null);
 
-const daemon = new PersonalDaemon(config, { debounceMs: 20 });
+const daemon = new PersonalDaemon(config);
 await daemon.enqueue(
   normalizeInbound(
     { type: 'message', id: 'evt-smoke', chatId: 'chat-smoke', text: 'hello smoke' },
@@ -143,15 +143,15 @@ Object.assign(steerRunner, {
   },
   getContextUsage: async () => ({ text: 'Context usage unavailable', source: 'test' }),
 });
-const steerDaemon = new PersonalDaemon(steerConfig, { runner: steerRunner, debounceMs: 20 });
-await steerDaemon.enqueue(feishuMessage('evt-active-1', 'om-active-1', 'first active'));
+const steerDaemon = new PersonalDaemon(steerConfig, { runner: steerRunner });
+void steerDaemon.enqueue(feishuMessage('evt-active-1', 'om-active-1', 'first active'));
 await until(() => running);
+// Each later message is steered as it arrives; nothing is batched.
 void steerDaemon.enqueue(feishuMessage('evt-active-2', 'om-active-2', 'second active'));
 void steerDaemon.enqueue(feishuMessage('evt-active-3', 'om-active-3', 'third active'));
-await until(() => steers.length === 1);
-assert.match(steers[0], /<inbound-messages channel="Feishu" count="2" received_at="[^"]+">/);
-assert.match(steers[0], /second active/);
-assert.match(steers[0], /third active/);
+await until(() => steers.length === 2);
+assert.match(steers[0], /<inbound-message [^>]*>\nsecond active\n<\/inbound-message>/);
+assert.match(steers[1], /<inbound-message [^>]*>\nthird active\n<\/inbound-message>/);
 assert.equal(running, true);
 resolveFirst?.();
 await until(() => jsonl(steerConfig.sender!.mockOutbox).length === 6);

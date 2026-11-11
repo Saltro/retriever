@@ -61,7 +61,9 @@ retriever daemon stop
 
 The pid file and background log live in `stateDir` (`daemon.pid`, `daemon.log`), so each state directory is managed independently. `start` refuses to run when a live pid already exists; `status` prints JSON and exits 1 when the daemon is not running. A pid file whose process is gone is reported as `stalePid` and removed by the next `status`, `restart`, or `stop`. Stopping sends `SIGTERM` and waits up to ten seconds for exit; it reports the log path instead of escalating to `SIGKILL`.
 
-Bundles: `dist/index.js` (daemon and CLI) and `dist/session-watcher.js` (async supervisor). The build also writes executable `dist/retriever` and `dist/retr` helpers. Running `retriever` without arguments starts the daemon; `send`, `return`, `bind`, `sessions`, `main-session`, `cron`, and `update` run their subcommands and exit, and `version` prints the installed version. Use the installed package binary or put `dist` on your PATH for manual calls; agent subprocesses receive the installed helper path automatically.
+Bundles: `dist/index.js` (daemon and CLI) and `dist/session-watcher.js` (async supervisor). The build also writes executable `dist/retriever` and `dist/retr` helpers. Running `retriever` without arguments starts the daemon; `send`, `return`, `bind`, `sessions`, `main-session`, `cron`, `help`, and `update` run their subcommands and exit, and `version` prints the installed version.
+
+Incoming messages are delivered as they arrive. A message that lands while the agent is already working is steered into the running turn instead of waiting for a batch or a timer. Use the installed package binary or put `dist` on your PATH for manual calls; agent subprocesses receive the installed helper path automatically.
 
 ## Configuration
 
@@ -86,10 +88,10 @@ Common overrides: `RETRIEVER_WORKSPACE_DIR`, `RETRIEVER_CHANNEL`, `PI_BIN`, `RET
 
 ### Channel adapters
 
-- **`feishu`** (default): Feishu WebSocket receiver, interactive-card sender, reactions, and ten-second user-message debounce. Needs `extensions.feishu.appId` and `appSecret`.
-- **`stdin`**: reads plain text or JSON lines from stdin and prints replies to stdout; no Feishu receiver, card, reaction, or debounce. Useful for local pipelines and debugging.
+- **`feishu`** (default): Feishu WebSocket receiver, interactive-card sender, and reactions. Needs `extensions.feishu.appId` and `appSecret`.
+- **`stdin`**: reads plain text or JSON lines from stdin and prints replies to stdout; no Feishu receiver, card, or reaction. Useful for local pipelines and debugging.
 
-The static registry in `src/core/channels/registry.ts` defines the adapter boundary: receiver lifecycle, sender, binding behavior, debounce, and dedupe. Implementations live in `src/extensions/` and are registered once by `src/extensions/channels.ts`. Registration is compiled in, so every entry bundle loads the same adapters; there is no dynamic plugin loader or multi-chat routing.
+The static registry in `src/core/channels/registry.ts` defines the adapter boundary: receiver lifecycle, sender, binding behavior, and dedupe. Implementations live in `src/extensions/` and are registered once by `src/extensions/channels.ts`. Registration is compiled in, so every entry bundle loads the same adapters; there is no dynamic plugin loader or multi-chat routing.
 
 ### Agent backend
 
@@ -126,9 +128,21 @@ retriever bind destination --chat-id oc_xxx
 # Compatibility alias:
 retriever bind feishu-chat --chat-id oc_xxx
 retriever bind status
-retriever send '**hello** from markdown'
+retriever send 'hello from the chat'
+retriever send --long '**markdown card** that does not fit a chat bubble'
 printf 'longer reply' | retriever send --stdin
 ```
+
+A send holds at most 200 characters unless `--long` is passed, so a default answer arrives as a few chat messages instead of one wall of text.
+
+A reply is also refused when the chat moved on while the agent was composing. Each turn records the platform create time of the message it was based on; `send` compares that anchor with the chat's recent messages and, when newer ones exist, prints them and exits 3 instead of talking past the user. Two exits are available:
+
+```bash
+retriever send --rebase --stdin   # the new text is already accounted for
+retriever send --force  --stdin   # the new messages do not affect this reply
+```
+
+Ordering comes from the platform, so the anchor survives restarts and log trimming. Own messages are excluded, an unknown anchor skips the check, and a failed message-list call logs and sends rather than blocking the reply.
 
 The first real Feishu message auto-binds when no destination exists. Every visible reply uses the bound destination, not the latest callback's parent metadata. The `stdin` channel can send without a prior binding.
 
@@ -142,6 +156,16 @@ printf 'longer report' | retriever return --stdin
 ```
 
 It needs parent metadata supplied by a session/cron launch or the surrounding Pi process. It does not send a visible chat message.
+
+## Prompts
+
+Every prompt carries the same short contract, on every agent backend: a run ends with `retriever send`, with `retriever return` for a child that has no automatic return, or with `NO_REPLY` for a deliberate silence. The contract also states the two rules specific to running under retriever and points at `retriever help` and the agents file instead of repeating command docs.
+
+`<configDir>/AGENTS.md` holds identity and working rules, which the daemon creates once and never rewrites, plus a marker-delimited section of runtime documentation that follows the installed version. Rename the agent by editing the `Name:` line.
+
+Event templates are XML and escape their bodies: `<inbound-message>` for a channel message, `<scheduled-wakeup>` for a cron fire, `<delegated-task>` for a child assignment, and `<child-session>` with an `<action>` block for a completion notice. Times are local with an offset, and a scheduled wake says explicitly that it is not a user message.
+
+`retriever help [command]` is the authoritative description of the tool surface.
 
 ## Sessions
 
@@ -178,7 +202,7 @@ First database access imports existing daemon JSON state transactionally and onc
 - `feishu-chat-binding.json`
 - existing `session-callbacks` notices
 
-Before deploying this migration, stop the old daemon and all old state-writing CLI/watchers. Keep the same state directory and verify the new records with CLI status/list commands. Malformed legacy state fails import with an error rather than being silently discarded. Source JSON files are retained; new code does not dual-write them. Do not keep old and new writers running together. Schema version 3 renames the automatic-return field while preserving existing session settings; old JSON fields are accepted only during import, not as CLI aliases.
+Before deploying this migration, stop the old daemon and all old state-writing CLI/watchers. Keep the same state directory and verify the new records with CLI status/list commands. Malformed legacy state fails import with an error rather than being silently discarded. Source JSON files are retained; new code does not dual-write them. Do not keep old and new writers running together. Schema version 4 adds the platform create time that anchors a reply to the message its turn was based on. Version 3 renamed the automatic-return field while preserving existing session settings. Old JSON fields are accepted only during import, not as CLI aliases.
 
 Logs, config, and Pi-native history/memory/skills remain files. Runtime SQL transactions never wait on model execution, spawn, RPC, or network calls. No real cache migration is performed by the test suite.
 
@@ -218,12 +242,14 @@ Pi commands have a response deadline (30 seconds by default, configurable with `
 src/
   index.ts                 single entry: daemon, or one CLI subcommand
   session-watcher.ts       supervised async session entry
-  cli/                     send, return, bind, sessions, cron
+  cli/                     send, return, bind, sessions, cron, help
+  prompts/                 contract, event templates, times, XML escaping
   config.ts  types.ts      configuration schema and shared types
   core/                    backend-agnostic engine
-    daemon/                event queue, debounce, reactions, callback delivery
-    events.ts              inbound normalization and agent prompt framing
+    daemon/                event queue, steering, reactions, callback delivery
+    events.ts              inbound normalization
     channels/registry.ts   channel contract and factory registry
+    channels/staleness.ts  detects that a reply is behind the conversation
     agents/                backend contract, profile resolution, registration
     sessions/              records, supervised execution, returns
     cron/                  cron parsing, persisted schedules, runtime dispatch

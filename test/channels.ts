@@ -63,7 +63,6 @@ registerChannelAdapter(
       closed = true;
     },
     bindInbound: () => undefined,
-    shouldDebounce: () => false,
     dedupeKey: (event) => `custom:${event.id}`,
   }),
 );
@@ -177,7 +176,7 @@ Object.assign(queuedRunner, {
     return '';
   },
 });
-const queuedDaemon = new PersonalDaemon(queuedConfig, { runner: queuedRunner, debounceMs: 10 });
+const queuedDaemon = new PersonalDaemon(queuedConfig, { runner: queuedRunner });
 void queuedDaemon.enqueue(
   normalizeInbound({ type: 'message', id: 'queued-first', text: 'first queued prompt' }, 'feishu'),
 );
