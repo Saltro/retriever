@@ -86,14 +86,10 @@ try {
   assert.notEqual(typeof spec, 'string');
   if (typeof spec !== 'string') {
     assert.equal(spec.command, '/profile/pi');
-    assert.deepEqual(spec.args, [
-      '--print',
-      '--session-id',
-      'snapshot',
-      '--approve',
-      'prompt',
-      '--own',
-    ]);
+    assert.deepEqual(spec.args.slice(0, 4), ['--print', '--session-id', 'snapshot', '--approve']);
+    // The contract travels inline with the prompt, identically on every backend.
+    assert.match(spec.args[4], /^# Retriever runtime[\s\S]*\n\nprompt$/);
+    assert.deepEqual(spec.args.slice(5), ['--own']);
     assert.doesNotMatch(JSON.stringify(spec.args), /global/);
   }
 
@@ -263,16 +259,16 @@ try {
   const legacySpec = sessionAgentProcess(legacyConfig, legacyRecord, 'old history');
   if (typeof legacySpec === 'string') throw new Error('legacy Pi record incorrectly selected mock');
   assert.equal(legacySpec.command, '/legacy/pi');
-  assert.deepEqual(legacySpec.args, [
+  assert.deepEqual(legacySpec.args.slice(0, 6), [
     '--print',
     '--session-id',
     'legacy',
     '--session-dir',
     legacyRecord.sessionDir,
     '--approve',
-    'old history',
-    '--legacy',
   ]);
+  assert.match(legacySpec.args[6], /^# Retriever runtime[\s\S]*\n\nold history$/);
+  assert.deepEqual(legacySpec.args.slice(7), ['--legacy']);
 
   const fakePi = path.join(tmp, 'silent-pi');
   fs.writeFileSync(
@@ -306,7 +302,9 @@ try {
     'a\n" b',
   );
   if (typeof argument === 'string') throw new Error('unexpected mock');
-  assert.deepEqual(argument.args, ['--task=a\n" b', '--id=arg-session']);
+  assert.equal(argument.args[1], '--id=arg-session');
+  // argument mode carries the inline contract inside the prompt placeholder.
+  assert.match(argument.args[0], /^--task=# Retriever runtime[\s\S]*\n\na\n" b$/);
   assert.equal(argument.stdin, undefined);
   assert.equal(argument.args.includes('--print'), false);
 

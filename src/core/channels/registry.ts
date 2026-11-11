@@ -7,7 +7,6 @@ export interface ChannelAdapter {
   start(onEvent: (event: InboundEvent) => Promise<void>): Promise<void>;
   close(): void;
   bindInbound(event: InboundEvent): void;
-  shouldDebounce(event: InboundEvent): boolean;
   dedupeKey(event: InboundEvent): string | null;
 }
 

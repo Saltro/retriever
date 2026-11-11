@@ -40,10 +40,6 @@ export class FeishuChannel implements ChannelAdapter {
     console.error(`[channel] feishu chat bound chat=${event.chatId}`);
   }
 
-  shouldDebounce(event: InboundEvent): boolean {
-    return event.kind === 'message' && event.source.includes('feishu');
-  }
-
   dedupeKey(event: InboundEvent): string | null {
     if (event.kind !== 'message') return null;
     return event.messageId

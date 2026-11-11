@@ -1,8 +1,10 @@
+import { inboundMessagePrompt } from '../../prompts/inbound.js';
+import { isSilenceReply, SILENCE_TOKEN } from '../../prompts/instructions.js';
+import { withContract } from '../../prompts/system.js';
 import type { AppConfig, InboundEvent } from '../../types.js';
 import { type AgentRunner, createMainAgentRunner } from '../agents/registry.js';
 import { type ChannelAdapter, createChannelAdapter } from '../channels/registry.js';
 import { RuntimeCronDispatcher } from '../cron/dispatch.js';
-import { toAgentPrompt } from '../events.js';
 import {
   acknowledgeParentNotification,
   claimParentNotifications,
@@ -15,14 +17,12 @@ import { readCurrentContext, recordContextUsage, writeCurrentContext } from '../
 export interface DaemonOptions {
   runner?: AgentRunner;
   channel?: ChannelAdapter;
-  debounceMs?: number;
 }
 
 const DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_MAX_KEYS = 1000;
 const PROCESSING_REACTION = 'OK';
 const COMPLETION_REACTION = 'DONE';
-const USER_MESSAGE_DEBOUNCE_MS = 10_000;
 
 export class PersonalDaemon {
   private runner: AgentRunner;
@@ -31,12 +31,9 @@ export class PersonalDaemon {
   private stopped = false;
   private callbacksRecovered = false;
   private callbackDeliveryScheduled = false;
-  private debounceMs: number;
   private runtimeCron: RuntimeCronDispatcher;
   private callbackPoller: NodeJS.Timeout | null = null;
   private seenInbound = new Map<string, number>();
-  private debounceTimer: NodeJS.Timeout | null = null;
-  private debouncedMessages: Array<{ event: InboundEvent; dedupeKey: string | null }> = [];
 
   constructor(
     private config: AppConfig,
@@ -44,7 +41,6 @@ export class PersonalDaemon {
   ) {
     this.runner = options.runner || createMainAgentRunner(config);
     this.channel = options.channel || createChannelAdapter(config);
-    this.debounceMs = options.debounceMs ?? USER_MESSAGE_DEBOUNCE_MS;
     this.runtimeCron = new RuntimeCronDispatcher(config, (event) => this.enqueue(event));
   }
 
@@ -65,8 +61,17 @@ export class PersonalDaemon {
       console.error(`[daemon] duplicate skipped event=${event.id} key=${dedupeKey}`);
       return this.queue;
     }
-    if (this.shouldDebounce(event)) {
-      this.debounceUserMessage(event, dedupeKey);
+    // A user message interrupts the running turn; wakes and callbacks wait their turn.
+    if (event.kind === 'message' && this.runner.isRunning() && this.runner.capabilities.steer) {
+      this.steerActiveRun(event).catch(async (error) => {
+        if (dedupeKey) this.seenInbound.delete(dedupeKey);
+        console.error(
+          `[daemon] steer failed event=${event.id}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+        // The runner is still busy, so a plain enqueue would be rejected and lost.
+        await this.runner.waitForSettled().catch(() => undefined);
+        void this.enqueueImmediate(event, dedupeKey).catch(() => undefined);
+      });
       return this.queue;
     }
     return this.enqueueImmediate(event, dedupeKey);
@@ -88,44 +93,20 @@ export class PersonalDaemon {
     return task;
   }
 
-  private shouldDebounce(event: InboundEvent): boolean {
-    return this.channel.shouldDebounce(event);
-  }
-
-  private debounceUserMessage(event: InboundEvent, dedupeKey: string | null): void {
-    this.debouncedMessages.push({ event, dedupeKey });
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debounceTimer = setTimeout(() => this.flushDebouncedMessages(), this.debounceMs);
-    console.error(
-      `[daemon] message debounced event=${event.id} batch_size=${this.debouncedMessages.length}`,
-    );
-  }
-
-  private flushDebouncedMessages(): void {
-    this.debounceTimer = null;
-    const batch = this.debouncedMessages.splice(0);
-    if (!batch.length) return;
-    const event = aggregateInboundMessages(batch.map((item) => item.event));
-    const dedupeKeys = batch.map((item) => item.dedupeKey).filter((key): key is string => !!key);
-    if (this.runner.isRunning() && this.runner.capabilities.steer) {
-      this.steerActiveRun(event).catch((error) => {
-        for (const key of dedupeKeys) this.seenInbound.delete(key);
-        console.error(
-          `[daemon] steer failed event=${event.id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-        this.enqueueImmediate(event);
-      });
-      return;
-    }
-    this.enqueueImmediate(event, dedupeKeys);
+  private promptFor(event: InboundEvent): string {
+    const message = event.prompt ?? inboundMessagePrompt(event, this.channel.label, true);
+    return withContract(this.config, 'main', message);
   }
 
   private async steerActiveRun(event: InboundEvent): Promise<void> {
     console.error(`[daemon] prompt steer event=${event.id} text_chars=${event.text.length}`);
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
-    writeCurrentContext(this.config, event);
-    const response = await this.runner.steer(toAgentPrompt(event, this.channel.label));
+    const response = await this.runner.steer(this.promptFor(event));
+    // A queued steer is delivered before the next model call. Until then the agent may
+    // still be composing from the older message, so the anchor stays put and `send`
+    // refuses once; --rebase/--force then advances it.
+    if (response.disposition !== 'queued') writeCurrentContext(this.config, event);
     console.error(`[daemon] prompt steered event=${event.id} disposition=${response.disposition}`);
     this.runner
       .waitForSettled()
@@ -155,14 +136,17 @@ export class PersonalDaemon {
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     writeCurrentContext(this.config, event);
     await this.refreshContextUsage(event.id);
-    const prompt = toAgentPrompt(event, this.channel.label);
+    const prompt = this.promptFor(event);
     console.error(`[daemon] prompt start event=${event.id}`);
-    await this.runner.promptAndWait(prompt);
+    const finalText = await this.runner.promptAndWait(prompt);
     await this.refreshContextUsage(event.id);
     const context = readCurrentContext(this.config);
     console.error(`[daemon] prompt done event=${event.id} send_count=${context.sendCount || 0}`);
-    if (!context.sendCount)
-      console.error(`[daemon] reply not sent event=${event.id} reason=agent_cli_not_called`);
+    if (!context.sendCount) {
+      if (isSilenceReply(finalText))
+        console.error(`[daemon] silent event=${event.id} reason=${SILENCE_TOKEN}`);
+      else console.error(`[daemon] reply not sent event=${event.id} reason=agent_cli_not_called`);
+    }
     await this.addReaction(event, COMPLETION_REACTION, 'completion');
   }
 
@@ -266,8 +250,6 @@ export class PersonalDaemon {
     this.stopped = true;
     this.runtimeCron.stop();
     if (this.callbackPoller) clearInterval(this.callbackPoller);
-    if (this.debounceTimer) clearTimeout(this.debounceTimer);
-    this.debouncedMessages = [];
     this.channel.close();
     this.runner.close();
   }
@@ -282,35 +264,4 @@ function reactionMessageIds(event: InboundEvent): string[] {
 
 function isInboundEvent(value: unknown): value is InboundEvent {
   return typeof value === 'object' && value !== null && 'id' in value && 'text' in value;
-}
-
-function aggregateInboundMessages(events: InboundEvent[]): InboundEvent {
-  if (events.length === 1) return events[0];
-  const first = events[0];
-  const last = events[events.length - 1];
-  const lines = [
-    `Aggregated ${events.length} inbound messages in receive order.`,
-    ...events.flatMap(
-      (event, index) =>
-        [
-          '',
-          `Message ${index + 1}:`,
-          `source=${event.source}`,
-          `event_id=${event.id}`,
-          `chat_id=${event.chatId}`,
-          event.messageId ? `message_id=${event.messageId}` : undefined,
-          event.userId ? `user_id=${event.userId}` : undefined,
-          event.text,
-        ].filter(Boolean) as string[],
-    ),
-  ];
-  return {
-    ...last,
-    id: `${first.id}..${last.id}`,
-    chatId: last.chatId,
-    messageId: last.messageId,
-    userId: last.userId,
-    text: lines.join('\n'),
-    raw: events,
-  };
 }

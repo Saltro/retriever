@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { unreadMessages } from '../src/core/channels/staleness.js';
 import {
   claimCronRun,
   deleteCron,
@@ -195,7 +196,12 @@ if (worker) {
     assert.equal(getCron(legacy, 'legacy-cron').prompt, 'wake');
     assert.equal(readFeishuChatBinding(legacy)?.chatId, 'visible-fixed');
     assert.deepEqual(listParentNotifications(legacy), [legacyNotice]);
-    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 3);
+    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 4);
+    const contextColumns = getStateDb(legacy)
+      .prepare('PRAGMA table_info(current_context)')
+      .all()
+      .map((column) => column.name);
+    assert.ok(contextColumns.includes('messageCreateTime'));
     const freshColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(sessions)')
       .all()
@@ -223,18 +229,19 @@ if (worker) {
       1,
     );
 
-    for (const version of [1, 2]) {
+    for (const version of [1, 2, 3]) {
       const migration = configFor(`schema-v${version}`);
       fs.mkdirSync(path.dirname(stateDbPath(migration)), { recursive: true });
       const oldDb = new DatabaseSync(stateDbPath(migration));
-      // Historical SQLite fixtures must use the real notify column, not autoReturn.
+      // Historical SQLite fixtures carry the column names of their own version: v1 and
+      // v2 use notify, v3 already renamed it.
       oldDb.exec(`CREATE TABLE state_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
         INSERT INTO state_meta VALUES ('legacy-json-v1', 'already-imported');
         CREATE TABLE sessions (
           id TEXT PRIMARY KEY, sessionId TEXT NOT NULL, cwd TEXT NOT NULL, sessionDir TEXT, name TEXT,
           status TEXT NOT NULL CHECK(status IN ('idle','running','completed','failed')),
           pid INTEGER, watcherPid INTEGER, runId TEXT, agentProfile TEXT, agentProfileSnapshot TEXT,
-          notify INTEGER NOT NULL CHECK(notify IN (0,1)), parentCallback TEXT, parentNotificationPath TEXT,
+          ${version >= 3 ? 'autoReturn' : 'notify'} INTEGER NOT NULL CHECK(${version >= 3 ? 'autoReturn' : 'notify'} IN (0,1)), parentCallback TEXT, parentNotificationPath TEXT,
           createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL, lastPrompt TEXT, lastResult TEXT,
           logPath TEXT NOT NULL, exitCode INTEGER, error TEXT
         );
@@ -242,7 +249,13 @@ if (worker) {
           id TEXT PRIMARY KEY, prompt TEXT NOT NULL, scheduleType TEXT NOT NULL,
           scheduleValue TEXT NOT NULL, target TEXT NOT NULL, enabled INTEGER NOT NULL,
           status TEXT NOT NULL, createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL,
-          lastFiredAt TEXT, nextRunAt TEXT, lastError TEXT${version === 2 ? ', runId TEXT' : ''}
+          lastFiredAt TEXT, nextRunAt TEXT, lastError TEXT${version >= 2 ? ', runId TEXT' : ''}
+        );
+        CREATE TABLE current_context (
+          singleton INTEGER PRIMARY KEY CHECK(singleton = 1), chatId TEXT NOT NULL, eventId TEXT NOT NULL,
+          messageId TEXT, source TEXT NOT NULL, kind TEXT NOT NULL,
+          textChars INTEGER NOT NULL, startedAt TEXT NOT NULL,
+          sendCount INTEGER NOT NULL, lastSentAt TEXT, contextUsage TEXT, contextUsageSource TEXT
         ); PRAGMA user_version = ${version};`);
       const migrationParent = {
         sessionId: 'main',
@@ -253,7 +266,7 @@ if (worker) {
       for (const value of [0, 1]) {
         oldDb
           .prepare(
-            'INSERT INTO sessions(id,sessionId,cwd,status,notify,parentCallback,agentProfile,agentProfileSnapshot,createdAt,updatedAt,lastResult,logPath) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
+            `INSERT INTO sessions(id,sessionId,cwd,status,${version >= 3 ? 'autoReturn' : 'notify'},parentCallback,agentProfile,agentProfileSnapshot,createdAt,updatedAt,lastResult,logPath) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
           )
           .run(
             migratedIds[value],
@@ -270,19 +283,20 @@ if (worker) {
             path.join(stateDir(migration), 'sessions', `${migratedIds[value]}.log`),
           );
       }
+      const legacyBoolean = version >= 3 ? 'autoReturn' : 'notify';
       assert.deepEqual(
         oldDb
-          .prepare('SELECT notify FROM sessions ORDER BY id')
+          .prepare(`SELECT ${legacyBoolean} AS value FROM sessions ORDER BY id`)
           .all()
-          .map((row) => row.notify),
+          .map((row) => row.value),
         [0, 1],
       );
       const oldColumns = oldDb
         .prepare('PRAGMA table_info(sessions)')
         .all()
         .map((column) => column.name);
-      assert.ok(oldColumns.includes('notify'));
-      assert.equal(oldColumns.includes('autoReturn'), false);
+      assert.ok(oldColumns.includes(legacyBoolean));
+      assert.equal(oldColumns.includes(version >= 3 ? 'notify' : 'autoReturn'), false);
       const migrationDue = new Date(Date.now() - 1000).toISOString();
       const cronId = `v${version}-cron`;
       oldDb
@@ -301,13 +315,18 @@ if (worker) {
           now,
           migrationDue,
         );
+      oldDb
+        .prepare(
+          'INSERT INTO current_context(singleton,chatId,eventId,messageId,source,kind,textChars,startedAt,sendCount) VALUES (1,?,?,?,?,?,?,?,0)',
+        )
+        .run('oc-migrate', `v${version}-event`, 'om-anchor', 'feishu-ws', 'message', 9, now);
       oldDb.close();
 
       const migratedDb = getStateDb(migration);
       assert.equal(
         migratedDb.prepare('PRAGMA user_version').get()?.user_version,
-        3,
-        `v${version} migrates to v3`,
+        4,
+        `v${version} migrates to v4`,
       );
       const migratedColumns = migratedDb
         .prepare('PRAGMA table_info(sessions)')
@@ -339,6 +358,20 @@ if (worker) {
         /CHECK constraint failed/,
         'renamed boolean column retains its constraint',
       );
+      const migratedContext = readCurrentContext(migration);
+      assert.equal(migratedContext.messageId, 'om-anchor');
+      assert.equal(
+        migratedContext.messageCreateTime,
+        undefined,
+        `v${version} context upgrades with no anchor`,
+      );
+      assert.deepEqual(
+        unreadMessages(migratedContext, [
+          { messageId: 'om-newer', createTime: Date.UTC(2030, 0, 1), text: 'newer' },
+        ]),
+        [],
+        'a missing anchor fails open instead of refusing every reply',
+      );
       assert.equal(getCron(migration, cronId).prompt, `preserved v${version} prompt`);
       const migratedClaim = claimCronRun(migration, cronId)!;
       assert.match(migratedClaim.runId!, /^[0-9a-f-]{36}$/);
@@ -352,8 +385,8 @@ if (worker) {
       closeStateDb(migration);
       assert.equal(
         getStateDb(migration).prepare('PRAGMA user_version').get()?.user_version,
-        3,
-        'v3 schema reopens without repeated ALTER',
+        4,
+        'v4 schema reopens without repeated ALTER',
       );
       for (const value of [0, 1])
         assert.equal(getSession(migration, migratedIds[value]).autoReturn, Boolean(value));

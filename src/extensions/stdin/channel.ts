@@ -55,10 +55,6 @@ export class StdinChannel implements ChannelAdapter {
     }
   }
 
-  shouldDebounce(): boolean {
-    return false;
-  }
-
   dedupeKey(): string | null {
     return null;
   }

@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { childCompletionPrompt, childReturnPrompt } from '../../prompts/callback.js';
 import type { AppConfig, InboundEvent } from '../../types.js';
 import { getStateDb, stateTransaction } from '../state/db.js';
 import { stateDir } from '../state/paths.js';
@@ -202,40 +203,17 @@ export function drainParentNotifications(config: AppConfig): ParentCallbackNotic
 }
 
 export function noticeToInbound(notice: ParentCallbackNotice): InboundEvent {
-  const text =
-    notice.type === 'session.return' ? returnNoticeText(notice) : completionNoticeText(notice);
+  const prompt =
+    notice.type === 'session.return' ? childReturnPrompt(notice) : childCompletionPrompt(notice);
   return {
     id: notice.id,
     source: 'session-callback',
     kind: 'wake',
     chatId: notice.parent.sessionId,
-    text,
+    text: prompt,
+    prompt,
     raw: notice,
   };
-}
-
-function completionNoticeText(notice: ParentCompletionNotice): string {
-  return [
-    `Child session ${notice.child.id} ${notice.child.status}.`,
-    `session_id=${notice.child.sessionId}`,
-    `cwd=${notice.child.cwd}`,
-    notice.child.sessionDir ? `session_dir=${notice.child.sessionDir}` : undefined,
-    `log=${notice.child.logPath}`,
-    notice.child.exitCode === undefined ? undefined : `exit_code=${notice.child.exitCode}`,
-    notice.child.error ? `error=${notice.child.error}` : undefined,
-    notice.child.lastResult ? `last_result:\n${notice.child.lastResult.slice(-3000)}` : undefined,
-    '',
-    'Decide the next action: send a visible reply, inspect child history, continue the child session, or record the result.',
-  ]
-    .filter(Boolean)
-    .join('\n');
-}
-
-function returnNoticeText(notice: ParentReturnNotice): string {
-  return [
-    notice.child?.id ? `Child session ${notice.child.id} returned:` : 'Child session returned:',
-    notice.text,
-  ].join('\n');
 }
 
 export function persistParentNotification(config: AppConfig, notice: ParentCallbackNotice): string {

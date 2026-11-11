@@ -3,6 +3,7 @@ import { loadConfig } from '../config.js';
 import { detectParentCallback } from '../core/sessions/callbacks.js';
 import { mainSessionRecord } from '../core/sessions/main.js';
 import { runSessionPrompt, selectSessionAgent } from '../core/sessions/service.js';
+import { delegatedTaskPrompt } from '../prompts/delegated.js';
 import { formatTable } from './table.js';
 
 export { runSessionPrompt } from '../core/sessions/service.js';
@@ -28,6 +29,7 @@ interface ParsedOptions {
   message?: string;
   stdin?: boolean;
   wait?: boolean;
+  json?: boolean;
   lines?: number;
 }
 
@@ -36,7 +38,7 @@ function usage(): never {
   retriever sessions create [--id <id>] [--cwd <cwd>] [--name <name>] [--agent <profile>] [--return|--no-return] [--prompt <text>] [--stdin] [--wait]
   retriever sessions send <id> [--message <text>] [--stdin] [--wait] [--return|--no-return]
   retriever sessions list
-  retriever sessions status <id>
+  retriever sessions status <id> [--json]
   retriever sessions history <id> [--lines <n>]`);
   process.exit(2);
 }
@@ -47,6 +49,7 @@ function parseOptions(args: string[]): ParsedOptions {
     const arg = args[i];
     if (arg === '--stdin') out.stdin = true;
     else if (arg === '--wait') out.wait = true;
+    else if (arg === '--json') out.json = true;
     else if (arg === '--return') out.autoReturn = true;
     else if (arg === '--no-return') out.autoReturn = false;
     else if (arg === '--id') out.id = needValue(args, ++i, arg);
@@ -103,17 +106,19 @@ async function createSession(config: AppConfig, opts: ParsedOptions): Promise<vo
   const parentCallback = detectParentCallback(config);
   const autoReturn = opts.autoReturn ?? Boolean(parentCallback);
   const prompt = await promptFromOptions(opts, 'prompt');
+  const task =
+    prompt && delegatedTaskPrompt(prompt, { isMainSession: !parentCallback, autoReturn });
   let record = newSessionRecord(config, {
     id,
     cwd: opts.cwd,
     name: opts.name,
     autoReturn,
     parentCallback,
-    prompt,
+    prompt: task,
   });
   record = selectSessionAgent(config, record, opts.agent, opts.cwd);
   record = insertSession(config, record);
-  if (prompt) record = await runSessionPrompt(config, record, prompt, Boolean(opts.wait));
+  if (task) record = await runSessionPrompt(config, record, task, Boolean(opts.wait));
   console.log(JSON.stringify(record, null, 2));
 }
 
@@ -129,7 +134,11 @@ async function sendSession(config: AppConfig, opts: ParsedOptions): Promise<void
   let record = getSession(config, id);
   if (opts.autoReturn !== undefined) record.autoReturn = opts.autoReturn;
   record.parentCallback = detectParentCallback(config) ?? record.parentCallback;
-  record = await runSessionPrompt(config, record, prompt, Boolean(opts.wait));
+  const task = delegatedTaskPrompt(prompt, {
+    isMainSession: !record.parentCallback,
+    autoReturn: record.autoReturn,
+  });
+  record = await runSessionPrompt(config, record, task, Boolean(opts.wait));
   console.log(JSON.stringify(record, null, 2));
 }
 
@@ -155,7 +164,34 @@ function listSessions(config: AppConfig): void {
 function statusSession(config: AppConfig, opts: ParsedOptions): void {
   const id = opts.positionals[0];
   if (!id) usage();
-  console.log(JSON.stringify(refreshSessionStatus(config, getSession(config, id)), null, 2));
+  const record = refreshSessionStatus(config, getSession(config, id));
+  if (opts.json) {
+    console.log(JSON.stringify(record, null, 2));
+    return;
+  }
+  console.log(
+    [
+      `session:  ${record.id}`,
+      `status:   ${record.status}`,
+      `return:   ${record.autoReturn}`,
+      `agent:    ${record.agentProfile || 'default'}${record.agentProfileSnapshot ? ` (${record.agentProfileSnapshot.backend})` : ''}`,
+      `cwd:      ${record.cwd}`,
+      `updated:  ${record.updatedAt}`,
+      record.error ? `error:    ${record.error}` : undefined,
+      `log:      ${record.logPath}`,
+      record.lastPrompt ? `\nlast prompt:\n${indent(record.lastPrompt)}` : undefined,
+      record.lastResult ? `\nlast result:\n${indent(record.lastResult)}` : undefined,
+    ]
+      .filter((line) => line !== undefined)
+      .join('\n'),
+  );
+}
+
+function indent(text: string): string {
+  return text
+    .split('\n')
+    .map((line) => `  ${line}`)
+    .join('\n');
 }
 
 function historySession(config: AppConfig, opts: ParsedOptions): void {

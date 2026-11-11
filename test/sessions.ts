@@ -206,7 +206,12 @@ try {
     'explicit --return is not silently disabled without a parent',
   );
   assert.equal(noParentReturn.status, 'completed');
-  assert.equal(noParentReturn.lastResult, 'saved-profile: complete without caller');
+  // The mock echoes a truncated prompt, so assert the contract and the task separately.
+  assert.match(noParentReturn.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.match(
+    noParentReturn.lastPrompt ?? '',
+    /^<delegated-task assigned_at="[^"]+">\ncomplete without caller\n<\/delegated-task>/,
+  );
   assert.equal(noParentReturn.parentCallback, undefined);
   assert.equal(noParentReturn.parentNotificationPath, undefined);
   assert.equal(noParentReturn.error, 'return failed: parent callback metadata missing');
@@ -277,9 +282,14 @@ try {
   ]);
   assert.equal(named.agentProfile, 'fast');
   assert.equal(named.agentProfileSnapshot.backend, 'mock');
-  assert.equal(named.lastResult, 'saved-profile: first');
+  // The mock echoes a truncated prompt, so assert the contract and the task separately.
+  assert.match(named.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.match(
+    named.lastPrompt ?? '',
+    /^<delegated-task assigned_at="[^"]+">\nfirst\n<\/delegated-task>/,
+  );
   assert.equal(named.autoReturn, false);
-  assert.equal(success(['status', 'named']).autoReturn, false);
+  assert.equal(success(['status', 'named', '--json']).autoReturn, false);
   const listed = command(['list']);
   assert.equal(listed.status, 0, listed.stderr);
   assert.match(listed.stdout, /^named\s+completed\s+false\s+/m);
@@ -340,7 +350,12 @@ try {
   };
   fs.writeFileSync(configPath, JSON.stringify(changedConfig));
   const repeated = success(['send', 'named', '--message', 'second', '--wait']);
-  assert.equal(repeated.lastResult, 'saved-profile: second');
+  // The mock echoes a truncated prompt, so assert the contract and the task separately.
+  assert.match(repeated.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.match(
+    repeated.lastPrompt ?? '',
+    /^<delegated-task assigned_at="[^"]+">\nsecond\n<\/delegated-task>/,
+  );
   const migration = command(['send', 'named', '--agent', 'plain', '--message', 'no']);
   assert.notEqual(migration.status, 0);
   assert.match(migration.stderr, /only supported by sessions create/);
@@ -375,11 +390,18 @@ try {
   assert.equal(asyncFinal.pid, undefined);
   assert.equal(asyncFinal.watcherPid, undefined);
   assert.equal(asyncFinal.runId, undefined);
-  assert.equal(asyncFinal.lastPrompt, 'original prompt');
+  assert.match(
+    asyncFinal.lastPrompt ?? '',
+    /^<delegated-task assigned_at="[^"]+">\noriginal prompt\n<\/delegated-task>/,
+  );
   const reply = JSON.parse(
     asyncFinal.lastResult!.split('\n').find((line) => line.startsWith('{'))!,
   );
-  assert.equal(reply.prompt, 'original prompt');
+  // The process backend has no system-prompt channel, so stdin carries the contract first.
+  assert.match(
+    reply.prompt,
+    /^# Retriever runtime[\s\S]*<delegated-task assigned_at="[^"]+">\noriginal prompt\n<\/delegated-task>/,
+  );
   assert.equal(reply.pid, asyncRecord.pid);
   assert.equal(reply.config, configPath);
   assert.equal(reply.path.split(path.delimiter)[0], path.join(project, 'dist'));
@@ -497,7 +519,8 @@ try {
     true,
   );
   assert.equal(recoveredSend.status, 'completed');
-  assert.equal(recoveredSend.lastResult, 'saved-profile: recovered without status first');
+  assert.match(recoveredSend.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.equal(recoveredSend.lastPrompt, 'recovered without status first');
   const staleCronTarget = putSession(config, {
     ...selectSessionAgent(
       config,
@@ -518,7 +541,12 @@ try {
     }),
     async () => {},
   );
-  assert.equal(getSession(config, staleCronTarget.id).lastResult, 'saved-profile: cron recovered');
+  const recovered = getSession(config, staleCronTarget.id);
+  assert.match(recovered.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.match(
+    fs.readFileSync(recovered.logPath, 'utf8'),
+    /<scheduled-wakeup cron_id="recover-fixed" schedule="\* \* \* \* \*" fired_at="[^"]+" utc="[^"]+">\nThis is a scheduled run, not a message from the user\.\n<task>\ncron recovered\n<\/task>/,
+  );
   assert.equal(getSession(config, staleCronTarget.id).autoReturn, false);
 
   for (const wait of [true, false]) {
@@ -580,7 +608,12 @@ try {
     fixedCron,
     async () => {},
   );
-  assert.equal(getSession(config, 'named').lastResult, 'saved-profile: cron saved');
+  const savedCron = getSession(config, 'named');
+  assert.match(savedCron.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.match(
+    fs.readFileSync(savedCron.logPath, 'utf8'),
+    /<scheduled-wakeup cron_id="fixed-profile" schedule="\* \* \* \* \*" fired_at="[^"]+" utc="[^"]+">\nThis is a scheduled run, not a message from the user\.\n<task>\ncron saved\n<\/task>/,
+  );
   const defaultCronConfig = {
     ...config,
     agentProfiles: { ...config.agentProfiles, default: config.agentProfiles!.fast },
@@ -596,7 +629,11 @@ try {
     (record) => record.name === 'cron:new-profile',
   )!;
   assert.equal(fresh.agentProfile, 'default');
-  assert.equal(fresh.lastResult, 'saved-profile: cron new');
+  assert.match(fresh.lastResult ?? '', /^saved-profile: # Retriever runtime/);
+  assert.match(
+    fs.readFileSync(fresh.logPath, 'utf8'),
+    /<scheduled-wakeup cron_id="new-profile" schedule="\* \* \* \* \*" fired_at="[^"]+" utc="[^"]+">\nThis is a scheduled run, not a message from the user\.\n<task>\ncron new\n<\/task>/,
+  );
 
   for (const [id, schedule] of [
     ['interrupted-once', { type: 'at', at: new Date(Date.now() - 1000).toISOString() }],

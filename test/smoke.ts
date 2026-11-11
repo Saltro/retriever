@@ -13,7 +13,7 @@ import { normalizeInbound } from '../src/core/events.js';
 import { listParentNotifications } from '../src/core/sessions/callbacks.js';
 import { loadRegistry } from '../src/core/sessions/registry.js';
 import { readFeishuChatBinding } from '../src/core/state/binding.js';
-import { readCurrentContext } from '../src/core/state/context.js';
+import { readCurrentContext, writeCurrentContext } from '../src/core/state/context.js';
 import { normalizeFeishuInbound } from '../src/extensions/feishu/normalize.js';
 import { extractContextUsage, PiRpcRunner } from '../src/extensions/pi/runner.js';
 import type { AppConfig } from '../src/types.js';
@@ -85,7 +85,7 @@ assert.equal(localStamp(nextCronDate('0 9 1 * 1', new Date(2026, 9, 2))), '2026-
 assert.equal(nextCronDate('0 0 * 13 *'), null);
 assert.equal(nextCronDate('0-10 * * * *'), null);
 
-const daemon = new PersonalDaemon(config, { debounceMs: 20 });
+const daemon = new PersonalDaemon(config);
 await daemon.enqueue(
   normalizeInbound(
     { type: 'message', id: 'evt-smoke', chatId: 'chat-smoke', text: 'hello smoke' },
@@ -143,15 +143,15 @@ Object.assign(steerRunner, {
   },
   getContextUsage: async () => ({ text: 'Context usage unavailable', source: 'test' }),
 });
-const steerDaemon = new PersonalDaemon(steerConfig, { runner: steerRunner, debounceMs: 20 });
-await steerDaemon.enqueue(feishuMessage('evt-active-1', 'om-active-1', 'first active'));
+const steerDaemon = new PersonalDaemon(steerConfig, { runner: steerRunner });
+void steerDaemon.enqueue(feishuMessage('evt-active-1', 'om-active-1', 'first active'));
 await until(() => running);
+// Each later message is steered as it arrives; nothing is batched.
 void steerDaemon.enqueue(feishuMessage('evt-active-2', 'om-active-2', 'second active'));
 void steerDaemon.enqueue(feishuMessage('evt-active-3', 'om-active-3', 'third active'));
-await until(() => steers.length === 1);
-assert.match(steers[0], /Aggregated 2 inbound messages/);
-assert.match(steers[0], /second active/);
-assert.match(steers[0], /third active/);
+await until(() => steers.length === 2);
+assert.match(steers[0], /<inbound-message [^>]*>\nsecond active\n<\/inbound-message>/);
+assert.match(steers[1], /<inbound-message [^>]*>\nthird active\n<\/inbound-message>/);
 assert.equal(running, true);
 resolveFirst?.();
 await until(() => jsonl(steerConfig.sender!.mockOutbox).length === 6);
@@ -221,7 +221,8 @@ assert.equal(created.status, 'completed');
 assert.equal(created.autoReturn, true);
 assert.ok(created.parentCallback);
 assert.ok(created.parentNotificationPath);
-assert.match(created.lastResult, /first prompt/);
+assert.match(created.lastPrompt, /first prompt/);
+assert.match(created.lastResult, /^mock pi reply: # Retriever runtime/);
 assert.equal(listParentNotifications(config).length, 1);
 await daemon.enqueue(
   normalizeInbound(
@@ -239,18 +240,40 @@ const continued = JSON.parse(
   cli(['sessions', 'send', 's1', '--message', 'second prompt', '--wait']).stdout,
 );
 assert.equal(continued.status, 'completed');
-assert.match(continued.lastResult, /second prompt/);
+assert.match(continued.lastPrompt, /second prompt/);
+assert.match(continued.lastResult, /^mock pi reply: # Retriever runtime/);
 assert.match(cli(['sessions', 'list']).stdout, /^ID\s+STATUS\s+RETURN\s+UPDATED\s+NAME$/m);
 assert.match(cli(['sessions', 'list']).stdout, /^s1\s+completed\s+true/m);
-assert.equal(JSON.parse(cli(['sessions', 'status', 's1']).stdout).id, 's1');
+assert.equal(JSON.parse(cli(['sessions', 'status', 's1', '--json']).stdout).id, 's1');
+assert.match(cli(['sessions', 'status', 's1']).stdout, /^session: {2}s1\nstatus: {3}completed\n/m);
 assert.match(
-  cli(['sessions', 'history', 's1', '--lines', '20']).stdout,
+  cli(['sessions', 'history', 's1', '--lines', '60']).stdout,
   /first prompt[\s\S]*second prompt/,
 );
 const mainSessionStatus = JSON.parse(cli(['main-session', 'status']).stdout);
 assert.equal(mainSessionStatus.sessionId, 'personal-agent');
 assert.equal(mainSessionStatus.backend, 'mock');
 assert.equal(JSON.parse(cli(['main-session']).stdout).sessionId, 'personal-agent');
+assert.match(cli(['help']).stdout, /^Commands:/m);
+assert.match(cli(['help', 'sessions']).stdout, /retriever sessions history <id>/);
+assert.match(
+  cli(['help', 'sessions', 'send']).stdout,
+  /A session that is already running rejects a new prompt/,
+);
+assert.match(cli(['help', 'nope']).stdout, /^Unknown command: nope/);
+const longReply = 'x'.repeat(201);
+const rawSend = (args: string[]) =>
+  spawnSync(process.execPath, [cliPath, ...args], {
+    cwd: repoRoot,
+    env: { ...process.env, RETRIEVER_CONFIG: configPath },
+    encoding: 'utf8',
+    timeout: 10000,
+  });
+const oversize = rawSend(['send', longReply]);
+assert.equal(oversize.status, 2);
+assert.match(oversize.stderr, /exceeds the 200-character chat limit/);
+assert.match(oversize.stderr, /--long/);
+assert.equal(rawSend(['send', '--long', longReply]).status, 0);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
 fs.writeFileSync(
@@ -278,12 +301,16 @@ const launched = JSON.parse(
 assert.equal(launched.status, 'running');
 await until(
   () =>
-    JSON.parse(cli(['sessions', 'status', 'async1'], asyncConfigPath).stdout).status !== 'running',
+    JSON.parse(cli(['sessions', 'status', 'async1', '--json'], asyncConfigPath).stdout).status !==
+    'running',
 );
-const asyncStatus = JSON.parse(cli(['sessions', 'status', 'async1'], asyncConfigPath).stdout);
+const asyncStatus = JSON.parse(
+  cli(['sessions', 'status', 'async1', '--json'], asyncConfigPath).stdout,
+);
 assert.equal(asyncStatus.status, 'completed');
 assert.equal(asyncStatus.pid, undefined);
-assert.match(asyncStatus.lastResult, /fake pi done: async prompt/);
+assert.match(asyncStatus.lastResult, /^fake pi done: # Retriever runtime/);
+assert.match(asyncStatus.lastPrompt, /<delegated-task [^>]*>\nasync prompt\n<\/delegated-task>/);
 
 cli([
   'cron',
@@ -426,13 +453,15 @@ await until(() =>
 );
 targetDispatcher.stop();
 const targetSessions = loadRegistry(targetConfig).sessions;
-assert.equal(
-  Object.values(targetSessions).filter((session) => session.lastPrompt === 'new target prompt')
-    .length,
-  1,
-);
-assert.equal(targetSessions['target-s1'].lastPrompt, 'session target prompt');
-assert.equal(targetSessions['fixed-child'].lastPrompt, 'fixed child prompt b');
+const targetedCrons = (prompt: string, id: string) =>
+  Object.values(targetSessions).filter(
+    (session) =>
+      session.lastPrompt?.includes(`<scheduled-wakeup cron_id="${id}"`) &&
+      session.lastPrompt.includes(prompt),
+  ).length;
+assert.equal(targetedCrons('new target prompt', 'once-new'), 1);
+assert.equal(targetedCrons('session target prompt', 'once-session'), 1);
+assert.equal(targetedCrons('fixed child prompt b', 'fixed-b'), 1);
 for (const session of Object.values(targetSessions)) assert.equal(session.autoReturn, false);
 assert.ok(targetSessions['fixed-child'].parentCallback);
 const fixedLog = fs.readFileSync(targetSessions['fixed-child'].logPath, 'utf8');
@@ -482,19 +511,50 @@ assert.equal(selectedMain.sessionId, 'target-s1');
 assert.match(cli(['sessions', 'list'], targetPath).stdout, /^target-s1\s+/m);
 daemon.stop();
 steerDaemon.stop();
+// A reply composed before newer messages arrived is refused, not sent.
+const stale = feishuMessage('evt-stale', 'om_stale', 'what about the cache');
+writeCurrentContext(config, stale);
+fs.writeFileSync(
+  `${outbox}.recent`,
+  [
+    { messageId: 'om_newer', createTime: 1_700_000_005_000, text: 'wait, check upstream first' },
+    { messageId: 'om_stale', createTime: 1_700_000_000_000, text: 'what about the cache' },
+  ]
+    .map((message) => JSON.stringify(message))
+    .join('\n'),
+);
+const staleSend = rawSend(['send', 'the cache looks fine']);
+assert.equal(staleSend.status, 3, staleSend.stderr);
+assert.match(staleSend.stderr, /not sent: 1 message\(s\) arrived after this turn started/);
+assert.match(staleSend.stderr, /wait, check upstream first/);
+assert.match(staleSend.stderr, /--rebase/);
+assert.equal(rawSend(['send', '--force', 'the cache looks fine']).status, 0);
+// --force records that the newer messages are accounted for, so the next
+// message of the same reply is not refused for the same reason.
+assert.equal(rawSend(['send', 'and the second half of the answer']).status, 0);
+assert.equal(readCurrentContext(config).messageId, 'om_newer');
+fs.unlinkSync(`${outbox}.recent`);
+assert.equal(rawSend(['send', 'no newer messages now']).status, 0);
+
 console.log('smoke ok', outbox);
 
-function feishuMessage(id: string, messageId: string, text: string) {
+function feishuMessage(
+  id: string,
+  messageId: string,
+  text: string,
+  createTime = 1_700_000_000_000,
+) {
   return normalizeFeishuInbound(
     {
       schema: '2.0',
       header: { event_id: id, event_type: 'im.message.receive_v1' },
       event: {
-        sender: { sender_id: { open_id: 'ou-test' } },
+        sender: { sender_id: { open_id: 'ou-test' }, sender_type: 'user' },
         message: {
           message_id: messageId,
           chat_id: 'oc-test',
           message_type: 'text',
+          create_time: String(createTime),
           content: JSON.stringify({ text }),
         },
       },

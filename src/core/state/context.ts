@@ -7,6 +7,7 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
     chatId: event.chatId,
     eventId: event.id,
     messageId: event.messageId,
+    messageCreateTime: event.createTime,
     source: event.source,
     kind: event.kind,
     textChars: event.text.length,
@@ -15,16 +16,18 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
   };
   const row = getStateDb(config)
     .prepare(`INSERT INTO current_context
-    (singleton, chatId, eventId, messageId, source, kind, textChars, startedAt, sendCount)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, 0)
+    (singleton, chatId, eventId, messageId, messageCreateTime, source, kind, textChars, startedAt, sendCount)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(singleton) DO UPDATE SET chatId=excluded.chatId, eventId=excluded.eventId,
-      messageId=excluded.messageId, source=excluded.source, kind=excluded.kind,
+      messageId=excluded.messageId, messageCreateTime=excluded.messageCreateTime,
+      source=excluded.source, kind=excluded.kind,
       textChars=excluded.textChars, startedAt=excluded.startedAt, sendCount=0,
       lastSentAt=NULL, contextUsage=NULL, contextUsageSource=NULL RETURNING *`)
     .get(
       context.chatId,
       context.eventId,
       context.messageId ?? null,
+      context.messageCreateTime ?? null,
       context.source,
       context.kind,
       context.textChars,
@@ -38,6 +41,18 @@ export function readCurrentContext(config: AppConfig): RuntimeContext {
   const row = getStateDb(config).prepare('SELECT * FROM current_context WHERE singleton = 1').get();
   if (!row) throw new Error(`current message context not found: ${stateDbPath(config)}`);
   return decodeStateRow<RuntimeContext>(row, contextFields);
+}
+
+/** Moves only the staleness anchor forward; event identity and counters stay put. */
+export function advanceContextAnchor(
+  config: AppConfig,
+  reference: { messageId: string; messageCreateTime: number },
+): RuntimeContext {
+  const row = getStateDb(config)
+    .prepare(`UPDATE current_context SET messageId = ?, messageCreateTime = ?
+    WHERE singleton = 1 AND (messageCreateTime IS NULL OR messageCreateTime <= ?) RETURNING *`)
+    .get(reference.messageId, reference.messageCreateTime, reference.messageCreateTime);
+  return row ? decodeStateRow<RuntimeContext>(row, contextFields) : readCurrentContext(config);
 }
 
 export function recordContextSend(config: AppConfig, expectedEventId?: string): RuntimeContext {

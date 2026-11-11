@@ -10,8 +10,9 @@ import {
   createChannelAdapter,
   registerChannelAdapter,
 } from '../src/core/channels/registry.js';
+import { unreadMessages } from '../src/core/channels/staleness.js';
 import { PersonalDaemon } from '../src/core/daemon/daemon.js';
-import { normalizeInbound, toAgentPrompt } from '../src/core/events.js';
+import { normalizeInbound } from '../src/core/events.js';
 import {
   listParentNotifications,
   noticeToInbound,
@@ -20,6 +21,9 @@ import {
 import { readFeishuChatBinding } from '../src/core/state/binding.js';
 import { readCurrentContext } from '../src/core/state/context.js';
 import { getStateDb } from '../src/core/state/db.js';
+import { inboundMessagePrompt } from '../src/prompts/inbound.js';
+import { isSilenceReply } from '../src/prompts/instructions.js';
+import { runtimeContract } from '../src/prompts/system.js';
 import type { AppConfig, OutboundReply } from '../src/types.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-channels-'));
@@ -59,7 +63,6 @@ registerChannelAdapter(
       closed = true;
     },
     bindInbound: () => undefined,
-    shouldDebounce: () => false,
     dedupeKey: (event) => `custom:${event.id}`,
   }),
 );
@@ -92,7 +95,21 @@ assert.equal(replies[0].text, 'custom egress');
 daemon.stop();
 assert.equal(closed, true);
 await assert.rejects(daemon.enqueue(normalizeInbound('after stop')), /stopped/);
-assert.doesNotMatch(toAgentPrompt(normalizeInbound('plain text')), /Feishu|Pi session/);
+const plainInbound = normalizeInbound('plain text');
+assert.doesNotMatch(inboundMessagePrompt(plainInbound, 'terminal', true), /Feishu|Pi session/);
+assert.doesNotMatch(inboundMessagePrompt(plainInbound, 'terminal', true), /retriever return/);
+assert.match(inboundMessagePrompt(plainInbound, 'terminal', false), /retriever return --stdin/);
+// The stable contract lives in the system prompt; per-message blocks carry only what varies.
+const contractFor = (role: 'main' | 'child') => runtimeContract(role, '/tmp/AGENTS.md');
+assert.match(contractFor('child'), /NO_REPLY/);
+assert.match(contractFor('child'), /retriever send --stdin/);
+assert.match(contractFor('main'), /NO_REPLY/);
+assert.doesNotMatch(contractFor('main'), /retriever return --stdin/);
+assert.match(contractFor('child'), /retriever return --stdin/);
+assert.doesNotMatch(inboundMessagePrompt(plainInbound, 'terminal', true), /response-instructions/);
+assert.equal(isSilenceReply(' NO_REPLY\n'), true);
+assert.equal(isSilenceReply('NO_REPLY.'), false);
+assert.equal(isSilenceReply('all done NO_REPLY'), false);
 
 const stdinConfig: AppConfig = {
   ...config,
@@ -159,7 +176,7 @@ Object.assign(queuedRunner, {
     return '';
   },
 });
-const queuedDaemon = new PersonalDaemon(queuedConfig, { runner: queuedRunner, debounceMs: 10 });
+const queuedDaemon = new PersonalDaemon(queuedConfig, { runner: queuedRunner });
 void queuedDaemon.enqueue(
   normalizeInbound({ type: 'message', id: 'queued-first', text: 'first queued prompt' }, 'feishu'),
 );
@@ -186,10 +203,7 @@ writeParentReturnNotification(
   'retry callback',
 );
 const callback = listParentNotifications(callbackConfig)[0];
-assert.doesNotMatch(
-  toAgentPrompt(noticeToInbound(callback), 'terminal'),
-  /Feishu|Child Pi session/,
-);
+assert.doesNotMatch(noticeToInbound(callback).prompt ?? '', /Feishu|Child Pi session/);
 const completion = noticeToInbound({
   type: 'session.completed',
   id: 'completion-neutral',
@@ -204,7 +218,7 @@ const completion = noticeToInbound({
     updatedAt: new Date().toISOString(),
   },
 });
-assert.doesNotMatch(toAgentPrompt(completion, 'terminal'), /Feishu|Child Pi session/);
+assert.doesNotMatch(completion.prompt ?? '', /Feishu|Child Pi session/);
 const failingRunner = createMainAgentRunner(callbackConfig);
 Object.assign(failingRunner, {
   promptAndWait: async () => {
@@ -276,4 +290,30 @@ const waitingText = waitingCallback === backlogIds[0] ? 'slow callback' : 'waiti
 assert.ok(resumedPrompts.some((prompt) => prompt.includes(waitingText)));
 assert.equal(listParentNotifications(backlogConfig).length, 0);
 resumedDaemon.stop();
+// Staleness: the anchor is the message current context was written for.
+const anchor = { messageId: 'om_2', messageCreateTime: 2000 };
+const recent = [
+  { messageId: 'om_3', createTime: 3000, text: 'newest' },
+  { messageId: 'om_2', createTime: 2000, text: 'anchor' },
+  { messageId: 'om_1', createTime: 1000, text: 'older' },
+  { messageId: 'om_bot', createTime: 4000, text: 'own reply', fromSelf: true },
+];
+assert.deepEqual(
+  unreadMessages(anchor, recent).map((message) => message.messageId),
+  ['om_3'],
+  'only messages newer than the anchor count',
+);
+assert.deepEqual(unreadMessages(anchor, recent.slice(1)), []);
+assert.deepEqual(
+  unreadMessages({ messageId: 'om_1', messageCreateTime: 2000 }, recent).map((m) => m.messageId),
+  ['om_3', 'om_2'],
+  'an equal timestamp from a different message counts as unread',
+);
+assert.deepEqual(
+  unreadMessages({ messageId: 'om_2' }, recent),
+  [],
+  'an unknown platform time disables the check instead of blocking every send',
+);
+assert.deepEqual(unreadMessages(anchor, []), []);
+
 console.log('channels ok');
