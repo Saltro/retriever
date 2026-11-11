@@ -70,6 +70,11 @@ export interface InboundEvent {
   userId?: string;
   messageId?: string;
   text: string;
+  /**
+   * Set by producers whose event carries its own semantics (scheduled wake, child completion).
+   * Plain channel messages leave it empty and get framed with the channel label instead.
+   */
+  prompt?: string;
   raw?: unknown;
 }
 

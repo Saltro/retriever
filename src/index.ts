@@ -3,6 +3,7 @@ import './extensions/index.js';
 import { runBindCli } from './cli/bind.js';
 import { runCronCli } from './cli/cron.js';
 import { runDaemonCli } from './cli/daemon.js';
+import { renderHelp } from './cli/help.js';
 import { runMainSessionCli } from './cli/main-session.js';
 import { runReturnCli } from './cli/return.js';
 import { runSendCli } from './cli/send.js';
@@ -13,23 +14,17 @@ import { PersonalDaemon } from './core/daemon/daemon.js';
 import { daemonStatus, removeDaemonPid, writeDaemonPid } from './core/daemon/lifecycle.js';
 
 function usage(exitCode: number): never {
-  console.error(`Usage:
-  retriever
-  retriever daemon <start|stop|restart|status>
-  retriever send <text...> | --stdin
-  retriever return <text...> | --stdin
-  retriever bind <destination|feishu-chat|status> ...
-  retriever sessions <create|send|list|status|history> ...
-  retriever main-session [status|use <session-id>]
-  retriever cron <create|list|status|update|disable|delete> ...
-  retriever update [--latest]
-  retriever version`);
+  console.error(renderHelp());
   process.exit(exitCode);
 }
 
 async function main(): Promise<void> {
   const [command, ...args] = process.argv.slice(2);
-  if (command === '--help' || command === '-h') usage(0);
+  if (command === '--help' || command === '-h' || command === 'help') {
+    console.log(renderHelp(args[0]));
+    if (command === 'help') return;
+    process.exit(0);
+  }
   if (command === 'version' || command === '-v' || command === '--version') runVersionCli();
   else if (command === 'update') await runUpdateCli(args);
   else if (command === 'send') await runSendCli(args);
@@ -40,7 +35,10 @@ async function main(): Promise<void> {
   else if (command === 'cron') await runCronCli(args);
   else if (command === 'daemon') await runDaemonCli(args);
   else if (command === undefined) runForegroundDaemon();
-  else usage(2);
+  else {
+    console.error(`Unknown command: ${command}`);
+    usage(2);
+  }
 }
 
 /** Foreground daemon: no pid file is required, but status/stop work while it runs. */

@@ -55,26 +55,3 @@ export function normalizeInbound(raw: unknown, source = 'unknown'): InboundEvent
     raw,
   };
 }
-
-export function toAgentPrompt(event: InboundEvent, channelLabel = 'channel'): string {
-  const sendInstruction = `To send a visible ${channelLabel} reply, run: retriever send --stdin`;
-  const returnInstruction =
-    'To report back to the main agent session, run: retriever return --stdin';
-  if (event.kind === 'wake') {
-    return [sendInstruction, returnInstruction, '', event.text].filter(Boolean).join('\n');
-  }
-  return [
-    `${channelLabel} inbound message`,
-    `source=${event.source}`,
-    `event_id=${event.id}`,
-    `chat_id=${event.chatId}`,
-    event.messageId ? `message_id=${event.messageId}` : undefined,
-    event.userId ? `user_id=${event.userId}` : undefined,
-    sendInstruction,
-    returnInstruction,
-    '',
-    event.text,
-  ]
-    .filter(Boolean)
-    .join('\n');
-}

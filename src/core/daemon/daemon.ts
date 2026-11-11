@@ -1,8 +1,11 @@
+import { aggregatedMessagesPrompt } from '../../prompts/aggregate.js';
+import { inboundMessagePrompt } from '../../prompts/inbound.js';
+import { isSilenceReply, SILENCE_TOKEN } from '../../prompts/instructions.js';
+import { withContract } from '../../prompts/system.js';
 import type { AppConfig, InboundEvent } from '../../types.js';
 import { type AgentRunner, createMainAgentRunner } from '../agents/registry.js';
 import { type ChannelAdapter, createChannelAdapter } from '../channels/registry.js';
 import { RuntimeCronDispatcher } from '../cron/dispatch.js';
-import { toAgentPrompt } from '../events.js';
 import {
   acknowledgeParentNotification,
   claimParentNotifications,
@@ -88,6 +91,11 @@ export class PersonalDaemon {
     return task;
   }
 
+  private promptFor(event: InboundEvent): string {
+    const message = event.prompt ?? inboundMessagePrompt(event, this.channel.label, true);
+    return withContract(this.config, 'main', message);
+  }
+
   private shouldDebounce(event: InboundEvent): boolean {
     return this.channel.shouldDebounce(event);
   }
@@ -105,7 +113,10 @@ export class PersonalDaemon {
     this.debounceTimer = null;
     const batch = this.debouncedMessages.splice(0);
     if (!batch.length) return;
-    const event = aggregateInboundMessages(batch.map((item) => item.event));
+    const event = aggregateInboundMessages(
+      batch.map((item) => item.event),
+      this.channel.label,
+    );
     const dedupeKeys = batch.map((item) => item.dedupeKey).filter((key): key is string => !!key);
     if (this.runner.isRunning() && this.runner.capabilities.steer) {
       this.steerActiveRun(event).catch((error) => {
@@ -125,7 +136,7 @@ export class PersonalDaemon {
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     writeCurrentContext(this.config, event);
-    const response = await this.runner.steer(toAgentPrompt(event, this.channel.label));
+    const response = await this.runner.steer(this.promptFor(event));
     console.error(`[daemon] prompt steered event=${event.id} disposition=${response.disposition}`);
     this.runner
       .waitForSettled()
@@ -155,14 +166,17 @@ export class PersonalDaemon {
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     writeCurrentContext(this.config, event);
     await this.refreshContextUsage(event.id);
-    const prompt = toAgentPrompt(event, this.channel.label);
+    const prompt = this.promptFor(event);
     console.error(`[daemon] prompt start event=${event.id}`);
-    await this.runner.promptAndWait(prompt);
+    const finalText = await this.runner.promptAndWait(prompt);
     await this.refreshContextUsage(event.id);
     const context = readCurrentContext(this.config);
     console.error(`[daemon] prompt done event=${event.id} send_count=${context.sendCount || 0}`);
-    if (!context.sendCount)
-      console.error(`[daemon] reply not sent event=${event.id} reason=agent_cli_not_called`);
+    if (!context.sendCount) {
+      if (isSilenceReply(finalText))
+        console.error(`[daemon] silent event=${event.id} reason=${SILENCE_TOKEN}`);
+      else console.error(`[daemon] reply not sent event=${event.id} reason=agent_cli_not_called`);
+    }
     await this.addReaction(event, COMPLETION_REACTION, 'completion');
   }
 
@@ -284,33 +298,19 @@ function isInboundEvent(value: unknown): value is InboundEvent {
   return typeof value === 'object' && value !== null && 'id' in value && 'text' in value;
 }
 
-function aggregateInboundMessages(events: InboundEvent[]): InboundEvent {
+function aggregateInboundMessages(events: InboundEvent[], channelLabel: string): InboundEvent {
   if (events.length === 1) return events[0];
   const first = events[0];
   const last = events[events.length - 1];
-  const lines = [
-    `Aggregated ${events.length} inbound messages in receive order.`,
-    ...events.flatMap(
-      (event, index) =>
-        [
-          '',
-          `Message ${index + 1}:`,
-          `source=${event.source}`,
-          `event_id=${event.id}`,
-          `chat_id=${event.chatId}`,
-          event.messageId ? `message_id=${event.messageId}` : undefined,
-          event.userId ? `user_id=${event.userId}` : undefined,
-          event.text,
-        ].filter(Boolean) as string[],
-    ),
-  ];
+  const prompt = aggregatedMessagesPrompt(events, channelLabel, true);
   return {
     ...last,
     id: `${first.id}..${last.id}`,
     chatId: last.chatId,
     messageId: last.messageId,
     userId: last.userId,
-    text: lines.join('\n'),
+    text: prompt,
+    prompt,
     raw: events,
   };
 }

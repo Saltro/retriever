@@ -149,7 +149,7 @@ await until(() => running);
 void steerDaemon.enqueue(feishuMessage('evt-active-2', 'om-active-2', 'second active'));
 void steerDaemon.enqueue(feishuMessage('evt-active-3', 'om-active-3', 'third active'));
 await until(() => steers.length === 1);
-assert.match(steers[0], /Aggregated 2 inbound messages/);
+assert.match(steers[0], /<inbound-messages channel="Feishu" count="2" received_at="[^"]+">/);
 assert.match(steers[0], /second active/);
 assert.match(steers[0], /third active/);
 assert.equal(running, true);
@@ -221,7 +221,8 @@ assert.equal(created.status, 'completed');
 assert.equal(created.autoReturn, true);
 assert.ok(created.parentCallback);
 assert.ok(created.parentNotificationPath);
-assert.match(created.lastResult, /first prompt/);
+assert.match(created.lastPrompt, /first prompt/);
+assert.match(created.lastResult, /^mock pi reply: # Retriever runtime/);
 assert.equal(listParentNotifications(config).length, 1);
 await daemon.enqueue(
   normalizeInbound(
@@ -239,18 +240,27 @@ const continued = JSON.parse(
   cli(['sessions', 'send', 's1', '--message', 'second prompt', '--wait']).stdout,
 );
 assert.equal(continued.status, 'completed');
-assert.match(continued.lastResult, /second prompt/);
+assert.match(continued.lastPrompt, /second prompt/);
+assert.match(continued.lastResult, /^mock pi reply: # Retriever runtime/);
 assert.match(cli(['sessions', 'list']).stdout, /^ID\s+STATUS\s+RETURN\s+UPDATED\s+NAME$/m);
 assert.match(cli(['sessions', 'list']).stdout, /^s1\s+completed\s+true/m);
-assert.equal(JSON.parse(cli(['sessions', 'status', 's1']).stdout).id, 's1');
+assert.equal(JSON.parse(cli(['sessions', 'status', 's1', '--json']).stdout).id, 's1');
+assert.match(cli(['sessions', 'status', 's1']).stdout, /^session: {2}s1\nstatus: {3}completed\n/m);
 assert.match(
-  cli(['sessions', 'history', 's1', '--lines', '20']).stdout,
+  cli(['sessions', 'history', 's1', '--lines', '60']).stdout,
   /first prompt[\s\S]*second prompt/,
 );
 const mainSessionStatus = JSON.parse(cli(['main-session', 'status']).stdout);
 assert.equal(mainSessionStatus.sessionId, 'personal-agent');
 assert.equal(mainSessionStatus.backend, 'mock');
 assert.equal(JSON.parse(cli(['main-session']).stdout).sessionId, 'personal-agent');
+assert.match(cli(['help']).stdout, /^Commands:/m);
+assert.match(cli(['help', 'sessions']).stdout, /retriever sessions history <id>/);
+assert.match(
+  cli(['help', 'sessions', 'send']).stdout,
+  /A session that is already running rejects a new prompt/,
+);
+assert.match(cli(['help', 'nope']).stdout, /^Unknown command: nope/);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
 fs.writeFileSync(
@@ -278,12 +288,16 @@ const launched = JSON.parse(
 assert.equal(launched.status, 'running');
 await until(
   () =>
-    JSON.parse(cli(['sessions', 'status', 'async1'], asyncConfigPath).stdout).status !== 'running',
+    JSON.parse(cli(['sessions', 'status', 'async1', '--json'], asyncConfigPath).stdout).status !==
+    'running',
 );
-const asyncStatus = JSON.parse(cli(['sessions', 'status', 'async1'], asyncConfigPath).stdout);
+const asyncStatus = JSON.parse(
+  cli(['sessions', 'status', 'async1', '--json'], asyncConfigPath).stdout,
+);
 assert.equal(asyncStatus.status, 'completed');
 assert.equal(asyncStatus.pid, undefined);
-assert.match(asyncStatus.lastResult, /fake pi done: async prompt/);
+assert.match(asyncStatus.lastResult, /^fake pi done: # Retriever runtime/);
+assert.match(asyncStatus.lastPrompt, /<delegated-task [^>]*>\nasync prompt\n<\/delegated-task>/);
 
 cli([
   'cron',
@@ -426,13 +440,15 @@ await until(() =>
 );
 targetDispatcher.stop();
 const targetSessions = loadRegistry(targetConfig).sessions;
-assert.equal(
-  Object.values(targetSessions).filter((session) => session.lastPrompt === 'new target prompt')
-    .length,
-  1,
-);
-assert.equal(targetSessions['target-s1'].lastPrompt, 'session target prompt');
-assert.equal(targetSessions['fixed-child'].lastPrompt, 'fixed child prompt b');
+const targetedCrons = (prompt: string, id: string) =>
+  Object.values(targetSessions).filter(
+    (session) =>
+      session.lastPrompt?.includes(`<scheduled-wakeup cron_id="${id}"`) &&
+      session.lastPrompt.includes(prompt),
+  ).length;
+assert.equal(targetedCrons('new target prompt', 'once-new'), 1);
+assert.equal(targetedCrons('session target prompt', 'once-session'), 1);
+assert.equal(targetedCrons('fixed child prompt b', 'fixed-b'), 1);
 for (const session of Object.values(targetSessions)) assert.equal(session.autoReturn, false);
 assert.ok(targetSessions['fixed-child'].parentCallback);
 const fixedLog = fs.readFileSync(targetSessions['fixed-child'].logPath, 'utf8');

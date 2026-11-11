@@ -15,6 +15,14 @@ function readMainSessionId(config: AppConfig): string {
   return readStateMeta(getStateDb(config), MAIN_SESSION_META_KEY) || MAIN_SESSION_ID;
 }
 
+/** Read-only role check: never creates the default main session as a side effect. */
+export function isMainSessionRecord(
+  config: AppConfig,
+  record: Pick<PersonalSessionRecord, 'id'> | undefined,
+): boolean {
+  return !!record && record.id === readMainSessionId(config);
+}
+
 export function selectMainSession(config: AppConfig, id: string): PersonalSessionRecord {
   const record = getSession(config, id);
   writeStateMeta(getStateDb(config), MAIN_SESSION_META_KEY, record.id);

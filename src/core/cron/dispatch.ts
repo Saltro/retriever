@@ -1,3 +1,4 @@
+import { scheduledWakeupPrompt } from '../../prompts/wake.js';
 import type { AppConfig, InboundEvent } from '../../types.js';
 import { normalizeInbound } from '../events.js';
 import { callbackQueuePath } from '../sessions/callbacks.js';
@@ -161,18 +162,25 @@ export async function dispatchRuntimeCron(
   record: RuntimeCronRecord,
   onMainEvent: (event: InboundEvent) => Promise<void>,
 ): Promise<void> {
+  // The whole cron body is one template: a wakeup always knows when it fired.
+  const prompt = scheduledWakeupPrompt({
+    cronId: record.id,
+    schedule: record.schedule,
+    firedAt: new Date(record.lastFiredAt ?? Date.now()),
+    prompt: record.prompt,
+    isMainSession: record.target === 'main',
+  });
   if (record.target === 'main') {
-    await onMainEvent(
-      normalizeInbound(
-        {
-          type: 'wake',
-          id: `cron-${record.id}-${Date.now()}`,
-          prompt: record.prompt,
-          chatId: `cron:${record.id}`,
-        },
-        'runtime-cron',
-      ),
+    const event = normalizeInbound(
+      {
+        type: 'wake',
+        id: `cron-${record.id}-${Date.now()}`,
+        text: record.prompt,
+        chatId: `cron:${record.id}`,
+      },
+      'runtime-cron',
     );
+    await onMainEvent({ ...event, prompt });
     return;
   }
 
@@ -187,17 +195,17 @@ export async function dispatchRuntimeCron(
           name: `cron:${record.id}`,
           autoReturn: false,
           parentCallback: mainParentCallback(config),
-          prompt: record.prompt,
+          prompt,
         }),
       ),
     );
-    await runSessionPrompt(config, session, record.prompt, false);
+    await runSessionPrompt(config, session, prompt, false);
     return;
   }
 
   const sessionId = record.target.slice('session:'.length);
   const session = fixedSessionTarget(config, record, sessionId);
-  await runSessionPrompt(config, session, record.prompt, false);
+  await runSessionPrompt(config, session, prompt, false);
 }
 
 function fixedSessionTarget(
