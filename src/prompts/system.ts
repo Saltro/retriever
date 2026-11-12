@@ -17,7 +17,7 @@ export function runtimeContract(role: SessionRole, agentsFile: string): string {
     '',
     '## End every run exactly one way',
     '- Answer the user: `retriever send --stdin` (one chat message, under 200 characters;',
-    '  send again for the rest, and use `--long` for code or markdown)',
+    '  send again for the rest, and use `--long` when it has to arrive as one message)',
     role === 'child'
       ? '- Hand a result to the parent session with `retriever return --stdin` when your run does not return automatically'
       : undefined,
@@ -73,8 +73,8 @@ send the original reply with \`--force\` when the new messages do not affect it.
 
 A send holds at most 200 characters by default. That is deliberate: a few short
 messages read like a conversation, one wall of text does not. Send the rest as
-follow-up messages instead of cramming. Pass \`--long\` when the content is code,
-a table or markdown that has to arrive as a single message.
+follow-up messages instead of cramming. Pass \`--long\` when the content has to
+arrive as a single message: code, a table, an answer that cannot be split.
 
 \`retriever return --stdin\` delivers text to the parent session that delegated to
 you.

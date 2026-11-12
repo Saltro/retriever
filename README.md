@@ -88,7 +88,7 @@ Common overrides: `RETRIEVER_WORKSPACE_DIR`, `RETRIEVER_CHANNEL`, `PI_BIN`, `RET
 
 ### Channel adapters
 
-- **`feishu`** (default): Feishu WebSocket receiver, interactive-card sender, and reactions. Needs `extensions.feishu.appId` and `appSecret`.
+- **`feishu`** (default): Feishu WebSocket receiver, markdown chat-message and card sender, and reactions. Needs `extensions.feishu.appId` and `appSecret`.
 - **`stdin`**: reads plain text or JSON lines from stdin and prints replies to stdout; no Feishu receiver, card, or reaction. Useful for local pipelines and debugging.
 
 The static registry in `src/core/channels/registry.ts` defines the adapter boundary: receiver lifecycle, sender, binding behavior, and dedupe. Implementations live in `src/extensions/` and are registered once by `src/extensions/channels.ts`. Registration is compiled in, so every entry bundle loads the same adapters; there is no dynamic plugin loader or multi-chat routing.
@@ -129,11 +129,11 @@ retriever bind destination --chat-id oc_xxx
 retriever bind feishu-chat --chat-id oc_xxx
 retriever bind status
 retriever send 'hello from the chat'
-retriever send --long '**markdown card** that does not fit a chat bubble'
+retriever send --long 'a table that must arrive as one message'
 printf 'longer reply' | retriever send --stdin
 ```
 
-A send holds at most 200 characters unless `--long` is passed, so a default answer arrives as a few chat messages instead of one wall of text.
+A send holds at most 200 characters unless `--long` is passed, so a default answer arrives as a few chat messages instead of one wall of text. A normal send is a plain chat message rendered from markdown with the context estimate as an italic last line; `--long` keeps the card for code, tables and anything that has to arrive as one message.
 
 A reply is also refused when the chat moved on while the agent was composing. Each turn records the platform create time of the message it was based on; `send` compares that anchor with the chat's recent messages and, when newer ones exist, prints them and exits 3 instead of talking past the user. Two exits are available:
 
@@ -146,7 +146,7 @@ Ordering comes from the platform, so the anchor survives restarts and log trimmi
 
 The first real Feishu message auto-binds when no destination exists. Every visible reply uses the bound destination, not the latest callback's parent metadata. The `stdin` channel can send without a prior binding.
 
-The daemon does not automatically forward final agent text. Prompts tell the agent to use `retriever send` for visible output. Feishu renders card JSON 2.0 markdown and a grey context occupancy footer. Send accounting updates the current SQLite context atomically; an event switch while the network send is in flight does not increment the new event's count.
+The daemon does not automatically forward final agent text. Prompts tell the agent to use `retriever send` for visible output. Feishu renders the reply markdown, and a normal send shows the context occupancy as an italic last line where `--long` uses a card footer. Send accounting updates the current SQLite context atomically; an event switch while the network send is in flight does not increment the new event's count.
 
 `return` is a separate path to the main agent:
 
@@ -271,4 +271,4 @@ test/                      storage, process lifecycle, backend/channel, session 
 
 ## Remaining limits
 
-One daemon is supported per state directory; there is no multi-daemon lease system. Ordinary incoming events still queue in memory and can be lost on exit; persisted callbacks have the retry policy above. Unix harness cancellation covers the owned process group; a harness that deliberately creates a separate detached group is outside that guarantee. Feishu supports text/markdown cards and reactions, not full attachment/media workflows. There is no arbitrary parent-session router, hot-loaded plugin system, or backend-history migration.
+One daemon is supported per state directory; there is no multi-daemon lease system. Ordinary incoming events still queue in memory and can be lost on exit; persisted callbacks have the retry policy above. Unix harness cancellation covers the owned process group; a harness that deliberately creates a separate detached group is outside that guarantee. Feishu supports markdown messages, cards and reactions, not full attachment/media workflows. There is no arbitrary parent-session router, hot-loaded plugin system, or backend-history migration.

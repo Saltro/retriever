@@ -185,18 +185,30 @@ const sent = jsonl(outbox)[2];
 assert.equal(sent.chatId, 'oc-test');
 assert.equal(sent.inReplyTo, 'return-callback-smoke');
 assert.equal(sent.contextFooter, 'Context usage unavailable');
-assert.equal(sent.msgType, 'interactive');
-assert.equal(sent.card.schema, '2.0');
-assert.equal(sent.card.config.width_mode, 'fill');
+assert.equal(sent.msgType, 'post');
 assert.equal(
-  sent.card.body.elements[0].content,
-  '**hello** from `retriever send`\n- list item with `inline code`',
+  sent.post.zh_cn.content[0][0].text,
+  '**hello** from `retriever send`\n- list item with `inline code`\n\n*Context usage unavailable*',
 );
-assert.match(
-  sent.card.body.elements[2].content,
-  /<font color="grey"><font size="small">Context usage unavailable/,
-);
+assert.equal(sent.post.zh_cn.content[0][0].tag, 'md');
 assert.equal(readCurrentContext(config).sendCount, 1);
+
+cli(['send', '--long', '--stdin'], configPath, {}, '```\ncode that does not fit a bubble\n```');
+const cardSend = jsonl(outbox)[3];
+assert.equal(cardSend.msgType, 'interactive', '--long keeps the card');
+assert.equal(cardSend.card.schema, '2.0');
+assert.equal(cardSend.card.config.width_mode, 'fill');
+assert.equal(cardSend.card.body.elements[0].content, '```\ncode that does not fit a bubble\n```');
+assert.equal(cardSend.card.body.elements.length, 2, 'the footer no longer sits behind a divider');
+assert.deepEqual(cardSend.card.body.elements[1], {
+  tag: 'div',
+  text: {
+    tag: 'plain_text',
+    content: 'Context usage unavailable',
+    text_size: 'notation',
+    text_color: 'grey',
+  },
+});
 
 const noParent = JSON.parse(cli(['sessions', 'create', '--id', 'no-parent']).stdout);
 assert.equal(noParent.autoReturn, false);

@@ -85,6 +85,8 @@ export interface OutboundReply {
   inReplyTo: string;
   text: string;
   contextFooter?: string;
+  /** Long output arrives as a card; a normal reply stays a plain chat message. */
+  long?: boolean;
 }
 
 /** A recently received message, as the platform reports it. */

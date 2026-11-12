@@ -24,7 +24,8 @@ export const COMMANDS: CommandHelp[] = [
       'Bound to the current event; no chat id is needed.',
       'This is the only way a person sees your output.',
       `Default limit is ${CHAT_REPLY_LIMIT} characters: split longer answers into a few sends, which reads more like a conversation.`,
-      '--long lifts the limit for code, markdown or a single long message.',
+      'A normal reply is a chat message rendered from markdown, with the context estimate as an italic last line.',
+      '--long lifts the limit and switches to a card, for code, tables or anything that must arrive as one message.',
       'If newer messages arrived while you were composing, the send is refused with their text: --rebase when the reply already accounts for them, --force when they do not affect it.',
     ],
     output:

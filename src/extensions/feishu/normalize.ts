@@ -1,6 +1,10 @@
 import { newId, normalizeInbound } from '../../core/events.js';
 import type { InboundEvent } from '../../types.js';
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
 interface FeishuMessage {
   message_id?: string;
   message_type?: string;
@@ -87,17 +91,19 @@ export function messageText(message: { message_type?: string; content?: unknown 
   }
   if (message.message_type === 'post' && typeof message.content === 'string') {
     try {
-      const parsed = JSON.parse(message.content) as {
+      const parsed = JSON.parse(message.content) as Record<string, unknown>;
+      // Feishu nests rich text under a locale key: zh_cn, en_us, ja_jp.
+      const locale = (Object.values(parsed).find(isRecord) ?? parsed) as {
         title?: string;
         content?: Array<Array<{ text?: string }>>;
       };
       const text =
-        parsed.content
+        locale.content
           ?.flat()
           .map((item) => item.text)
           .filter(Boolean)
           .join('') || '';
-      return [parsed.title, text].filter(Boolean).join('\n') || message.content;
+      return [locale.title, text].filter(Boolean).join('\n') || message.content;
     } catch {
       return message.content;
     }

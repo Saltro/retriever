@@ -20,8 +20,8 @@ export function sendUsage(command = 'retriever send'): never {
   console.error(`Usage: ${command} [--long] [--rebase|--force] <text...> | --stdin
 
 The default reply is a chat message of at most ${CHAT_REPLY_LIMIT} characters.
-Split longer answers into a few sends, or pass --long for code, markdown or
-anything that does not fit a chat bubble.
+Split longer answers into a few sends, or pass --long for code, tables or
+anything that has to arrive as one message.
 
 --rebase  newer messages arrived; this text already accounts for them
 --force   newer messages arrived; they do not affect this reply`);
@@ -77,6 +77,7 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
     inReplyTo: context?.eventId || 'manual',
     text,
     contextFooter: context?.contextUsage,
+    long,
   });
   if (context) {
     try {
