@@ -1,4 +1,4 @@
-import type { RecentMessage, RuntimeContext } from '../../types.js';
+import type { CurrentContext, RecentMessage } from '../../types.js';
 
 export const RECENT_MESSAGE_WINDOW = 20;
 
@@ -21,7 +21,7 @@ export function newestUnreadAnchor(recent: RecentMessage[]): RecentMessage | und
 }
 
 export function unreadMessages(
-  context: Pick<RuntimeContext, 'messageId' | 'messageCreateTime'>,
+  context: Pick<CurrentContext, 'messageId' | 'messageCreateTime'>,
   recent: RecentMessage[],
 ): RecentMessage[] {
   if (context.messageCreateTime === undefined) return [];

@@ -1,9 +1,9 @@
-import type { AppConfig, InboundEvent, RuntimeContext } from '../../types.js';
+import type { AppConfig, CurrentContext, InboundEvent } from '../../types.js';
 import { contextFields, decodeStateRow, getStateDb } from './db.js';
 import { stateDbPath } from './paths.js';
 
-export function writeCurrentContext(config: AppConfig, event: InboundEvent): RuntimeContext {
-  const context: RuntimeContext = {
+export function writeCurrentContext(config: AppConfig, event: InboundEvent): CurrentContext {
+  const context: CurrentContext = {
     chatId: event.chatId,
     eventId: event.id,
     messageId: event.messageId,
@@ -39,13 +39,13 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
       context.startedAt,
     );
   if (!row) throw new Error('current context upsert returned no row');
-  return decodeStateRow<RuntimeContext>(row, contextFields);
+  return decodeStateRow<CurrentContext>(row, contextFields);
 }
 
-export function readCurrentContext(config: AppConfig): RuntimeContext {
+export function readCurrentContext(config: AppConfig): CurrentContext {
   const row = getStateDb(config).prepare('SELECT * FROM current_context WHERE singleton = 1').get();
   if (!row) throw new Error(`current message context not found: ${stateDbPath(config)}`);
-  return decodeStateRow<RuntimeContext>(row, contextFields);
+  return decodeStateRow<CurrentContext>(row, contextFields);
 }
 
 /**
@@ -55,15 +55,15 @@ export function readCurrentContext(config: AppConfig): RuntimeContext {
 export function advanceContextAnchor(
   config: AppConfig,
   reference: { messageId: string; messageCreateTime: number },
-): RuntimeContext {
+): CurrentContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET messageId = ?, messageCreateTime = ?
     WHERE singleton = 1 AND (messageCreateTime IS NULL OR messageCreateTime <= ?) RETURNING *`)
     .get(reference.messageId, reference.messageCreateTime, reference.messageCreateTime);
-  return row ? decodeStateRow<RuntimeContext>(row, contextFields) : readCurrentContext(config);
+  return row ? decodeStateRow<CurrentContext>(row, contextFields) : readCurrentContext(config);
 }
 
-export function recordContextSend(config: AppConfig, expectedEventId?: string): RuntimeContext {
+export function recordContextSend(config: AppConfig, expectedEventId?: string): CurrentContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET sendCount = sendCount + 1, lastSentAt = ?
     WHERE singleton = 1 ${expectedEventId === undefined ? '' : 'AND eventId = ?'} RETURNING *`)
@@ -75,7 +75,7 @@ export function recordContextUsage(
   config: AppConfig,
   usage: { text: string; source: string },
   expectedEventId?: string,
-): RuntimeContext {
+): CurrentContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET contextUsage = ?, contextUsageSource = ?
     WHERE singleton = 1 ${expectedEventId === undefined ? '' : 'AND eventId = ?'} RETURNING *`)
@@ -87,8 +87,8 @@ function updatedContext(
   config: AppConfig,
   row: Record<string, unknown> | undefined,
   expectedEventId?: string,
-): RuntimeContext {
-  if (row) return decodeStateRow<RuntimeContext>(row, contextFields);
+): CurrentContext {
+  if (row) return decodeStateRow<CurrentContext>(row, contextFields);
   const context = readCurrentContext(config);
   throw new Error(
     `current message context ownership changed: expected event ${expectedEventId}, current event ${context.eventId}`,

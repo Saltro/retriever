@@ -13,7 +13,7 @@ import {
   readCurrentContext,
   recordContextSend,
 } from '../core/state/context.js';
-import type { Attachment, RecentMessage, ReplyThread, RuntimeContext } from '../types.js';
+import type { Attachment, CurrentContext, RecentMessage, ReplyThread } from '../types.js';
 
 /** Long enough for a chat-style reply, short enough to keep the conversation readable. */
 export const CHAT_REPLY_LIMIT = 200;
@@ -110,7 +110,7 @@ async function sendText(
   config: ReturnType<typeof loadConfig>,
   channel: ReturnType<typeof createChannelAdapter>,
   chatId: string,
-  context: RuntimeContext | undefined,
+  context: CurrentContext | undefined,
   text: string,
   long: boolean,
   thread: ReplyThread | undefined,
@@ -130,7 +130,7 @@ async function sendText(
 
 function recordSend(
   config: ReturnType<typeof loadConfig>,
-  context: RuntimeContext,
+  context: CurrentContext,
   chatId: string,
   command: string,
 ): void {
@@ -154,7 +154,7 @@ async function guardConversation(
   config: ReturnType<typeof loadConfig>,
   channel: ReturnType<typeof createChannelAdapter>,
   chatId: string,
-  context: RuntimeContext,
+  context: CurrentContext,
   flags: { rebase: boolean; force: boolean },
   command: string,
 ): Promise<void> {
@@ -206,7 +206,7 @@ async function guardConversation(
  * anchor, which moves forward — and only when that thread lives in the bound chat:
  * a thread from another input chat must not pull the visible destination with it.
  */
-function replyThread(context: RuntimeContext | undefined, chatId: string): ReplyThread | undefined {
+function replyThread(context: CurrentContext | undefined, chatId: string): ReplyThread | undefined {
   if (!context?.threadId || !context.turnMessageId || context.chatId !== chatId) return undefined;
   return { id: context.threadId, anchorMessageId: context.turnMessageId };
 }

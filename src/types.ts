@@ -139,7 +139,7 @@ export interface Sender {
   recentMessages?(chatId: string, limit: number): Promise<RecentMessage[]>;
 }
 
-export interface RuntimeContext {
+export interface CurrentContext {
   chatId: string;
   eventId: string;
   /**
