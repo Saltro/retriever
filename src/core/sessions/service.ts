@@ -5,9 +5,12 @@ import path from 'node:path';
 import type { AppConfig } from '../../types.js';
 import {
   type AgentProcess,
+  type AgentRunner,
   resolveAgentProfile,
   sessionAgentProcess,
   sessionAgentProfile,
+  sessionAgentPrompt,
+  sessionAgentRunner,
 } from '../agents/registry.js';
 import {
   agentProcessDetached,
@@ -21,6 +24,11 @@ import {
   sessionWatcherCommand,
 } from '../runtime/process-paths.js';
 import {
+  expireSessionMessages,
+  markSessionMessageDelivered,
+  pendingSessionMessages,
+} from './messages.js';
+import {
   appendSessionLog,
   claimSessionRun,
   finishSessionRunAndReturn,
@@ -31,6 +39,8 @@ import {
 } from './registry.js';
 
 const STARTUP_TIMEOUT_MS = 10_000;
+/** A steer waits at most this long for its turn; the agent's own latency dominates. */
+const STEER_POLL_MS = 500;
 
 class SessionStartupError extends Error {
   constructor(
@@ -123,6 +133,20 @@ export async function runSessionPrompt(
       record,
       `\n## ${new Date().toISOString()} prompt runId=${runId} agent=${selected.name} backend=${selected.profile.backend}\n${prompt}\n\n`,
     );
+    // Only a foreground run can own the live channel; a background run hands it to the watcher.
+    const runner = wait ? sessionAgentRunner(config, record) : undefined;
+    if (runner) {
+      const finished = await executeSessionRunner(
+        config,
+        record,
+        runId,
+        runner,
+        sessionAgentPrompt(config, record, prompt),
+        () => {},
+      );
+      if (finished.status === 'failed') throw new Error(finished.error || 'agent execution failed');
+      return finished;
+    }
     const spec = sessionAgentProcess(config, record, prompt);
     if (typeof spec === 'string') {
       appendSessionLog(record, `${spec}\n`);
@@ -366,6 +390,89 @@ async function executeSessionProcess(
   }
 }
 
+function steerPoller(
+  config: AppConfig,
+  record: PersonalSessionRecord,
+  runId: string,
+  runner: AgentRunner,
+): () => void {
+  let busy = false;
+  const timer = setInterval(() => {
+    // A steer queued before the prompt started waits for the run instead of racing it.
+    if (busy || !runner.isRunning()) return;
+    busy = true;
+    void (async () => {
+      try {
+        for (const queued of pendingSessionMessages(config, record.id, runId)) {
+          const { disposition } = await runner.steer(queued.message);
+          markSessionMessageDelivered(config, queued.id);
+          appendSessionLog(
+            record,
+            `\n## ${new Date().toISOString()} steer queued=${queued.id} disposition=${disposition}\n${queued.message}\n`,
+          );
+        }
+      } catch (error) {
+        appendSessionLog(
+          record,
+          `\n${new Date().toISOString()} steer failed: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      } finally {
+        busy = false;
+      }
+    })();
+  }, STEER_POLL_MS);
+  timer.unref();
+  return () => clearInterval(timer);
+}
+
+/**
+ * Drives a child session through a live runner instead of a one-shot process, so a
+ * steering message can reach the agent while it works.
+ */
+async function executeSessionRunner(
+  config: AppConfig,
+  record: PersonalSessionRecord,
+  runId: string,
+  runner: AgentRunner,
+  prompt: string,
+  onStarted: () => void,
+): Promise<PersonalSessionRecord> {
+  const stopPolling = steerPoller(config, record, runId, runner);
+  try {
+    runner.start();
+    // The live channel has no worker pid of its own, so the process holding it owns the run.
+    if (!updateSessionRun(config, record.id, runId, { pid: process.pid }))
+      throw new Error('session run ownership lost before execution');
+    onStarted();
+    await runner
+      .setSteeringMode?.('all')
+      .catch((error) =>
+        appendSessionLog(
+          record,
+          `\n${new Date().toISOString()} steering mode unchanged: ${error instanceof Error ? error.message : String(error)}\n`,
+        ),
+      );
+    const text = await runner.promptAndWait(prompt);
+    // The run's own completion line is written by finishSessionRun, so only the reply goes here.
+    if (text.trim()) appendSessionLog(record, `\n${text}\n`);
+    return finishSessionRun(config, record.id, runId, {
+      status: 'completed',
+      exitCode: 0,
+      lastResult: text.trim(),
+    });
+  } catch (error) {
+    return finishSessionRun(config, record.id, runId, {
+      status: 'failed',
+      exitCode: null,
+      error: error instanceof Error ? error.message : String(error),
+    });
+  } finally {
+    stopPolling();
+    expireSessionMessages(config, record.id, runId);
+    runner.close();
+  }
+}
+
 /** Watcher and --wait share the same process-group teardown and guarded completion. */
 export async function executeSessionRun(
   config: AppConfig,
@@ -378,7 +485,21 @@ export async function executeSessionRun(
     const record = getSession(config, id);
     if (record.runId !== runId || record.status !== 'running')
       throw new Error('session run ownership lost before execution');
-    const spec = sessionAgentProcess(config, record, fs.readFileSync(promptFile, 'utf8'));
+    const prompt = fs.readFileSync(promptFile, 'utf8');
+    const runner = sessionAgentRunner(config, record);
+    if (runner) {
+      const finished = await executeSessionRunner(
+        config,
+        record,
+        runId,
+        runner,
+        sessionAgentPrompt(config, record, prompt),
+        onStarted,
+      );
+      if (finished.status === 'failed') throw new Error(finished.error || 'agent execution failed');
+      return;
+    }
+    const spec = sessionAgentProcess(config, record, prompt);
     if (typeof spec === 'string') {
       onStarted();
       appendSessionLog(record, `${spec}\n`);

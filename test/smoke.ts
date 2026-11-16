@@ -273,10 +273,7 @@ assert.equal(mainSessionStatus.backend, 'mock');
 assert.equal(JSON.parse(cli(['main-session']).stdout).sessionId, 'personal-agent');
 assert.match(cli(['help']).stdout, /^Commands:/m);
 assert.match(cli(['help', 'sessions']).stdout, /retriever sessions history <id>/);
-assert.match(
-  cli(['help', 'sessions', 'send']).stdout,
-  /A session that is already running rejects a new prompt/,
-);
+assert.match(cli(['help', 'sessions', 'send']).stdout, /takes the message as a steering prompt/);
 assert.match(cli(['help', 'nope']).stdout, /^Unknown command: nope/);
 const longReply = 'x'.repeat(201);
 const rawSend = (args: string[]) =>
@@ -317,10 +314,33 @@ assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
 assert.equal(readCurrentContext(config).sendCount, beforeAttachments + 1);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
-fs.writeFileSync(
-  fakePi,
-  `#!/usr/bin/env node\nconst prompt = process.argv[process.argv.length - 1];\nsetTimeout(() => console.log('fake pi done: ' + prompt), 500);\n`,
-);
+// A pi child runs in --mode rpc: it answers JSONL commands and settles the run itself.
+const fakePiRpc = `
+const readline = require('node:readline');
+const rl = readline.createInterface({ input: process.stdin });
+const send = (record) => process.stdout.write(JSON.stringify(record) + '\\n');
+let output = '';
+const steered = [];
+rl.on('line', (line) => {
+  const command = JSON.parse(line);
+  if (command.type === 'prompt') {
+    send({ id: command.id, type: 'response', command: 'prompt', success: true, data: { disposition: 'started' } });
+    setTimeout(() => {
+      output = 'fake pi done: ' + command.message + (steered.length ? ' | steered: ' + steered.join('; ') : '');
+      send({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: output } });
+      send({ type: 'agent_settled' });
+    }, 2500);
+  } else if (command.type === 'steer') {
+    steered.push(command.message);
+    send({ id: command.id, type: 'response', command: 'steer', success: true, data: { disposition: 'queued' } });
+  } else if (command.type === 'get_last_assistant_text') {
+    send({ id: command.id, type: 'response', command: 'get_last_assistant_text', success: true, data: { text: output } });
+  } else {
+    send({ id: command.id, type: 'response', command: command.type, success: true, data: {} });
+  }
+});
+`;
+fs.writeFileSync(fakePi, `#!/usr/bin/env node\n${fakePiRpc}`);
 fs.chmodSync(fakePi, 0o755);
 const asyncConfig: AppConfig = {
   ...config,
@@ -340,6 +360,11 @@ const launched = JSON.parse(
   ).stdout,
 );
 assert.equal(launched.status, 'running');
+// A message to a running session is steered into the live run instead of rejected.
+const steered = JSON.parse(
+  cli(['sessions', 'send', 'async1', '--message', 'steer me'], asyncConfigPath).stdout,
+);
+assert.equal(steered.steer, 'queued');
 await until(
   () =>
     JSON.parse(cli(['sessions', 'status', 'async1', '--json'], asyncConfigPath).stdout).status !==
@@ -351,6 +376,7 @@ const asyncStatus = JSON.parse(
 assert.equal(asyncStatus.status, 'completed');
 assert.equal(asyncStatus.pid, undefined);
 assert.match(asyncStatus.lastResult, /^fake pi done: # Retriever runtime/);
+assert.match(asyncStatus.lastResult, /\| steered: steer me$/);
 assert.match(asyncStatus.lastPrompt, /<delegated-task [^>]*>\nasync prompt\n<\/delegated-task>/);
 
 cli([

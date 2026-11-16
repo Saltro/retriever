@@ -6,7 +6,7 @@ import type { RuntimeCronRecord } from '../cron/registry.js';
 import { normalizeRuntimeCron } from '../cron/registry.js';
 import { stateDbPath, stateDir } from './paths.js';
 
-const SCHEMA_VERSION = 6;
+const SCHEMA_VERSION = 7;
 const connections = new Map<string, DatabaseSync>();
 type FieldKind = 'text' | 'number' | 'boolean' | 'json';
 export type StateFields = Record<string, FieldKind>;
@@ -154,6 +154,19 @@ export function getStateDb(config: AppConfig): DatabaseSync {
         db.exec(
           'ALTER TABLE current_context ADD COLUMN turnMessageId TEXT; PRAGMA user_version = 6;',
         );
+      }
+      if (version < 7) {
+        db.exec(`
+          CREATE TABLE IF NOT EXISTS session_messages (
+            id TEXT PRIMARY KEY, sessionId TEXT NOT NULL, runId TEXT NOT NULL, message TEXT NOT NULL,
+            createdAt TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','delivered','expired')),
+            deliveredAt TEXT
+          );
+          CREATE INDEX IF NOT EXISTS session_messages_pending
+            ON session_messages(sessionId, runId, status, createdAt);
+          PRAGMA user_version = 7;
+        `);
       }
       if (!db.prepare('SELECT value FROM state_meta WHERE key = ?').get('legacy-json-v1')) {
         importLegacyState(db, config);

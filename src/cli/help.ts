@@ -60,12 +60,17 @@ export const COMMANDS: CommandHelp[] = [
   },
   {
     name: 'sessions send',
-    summary: 'Send a message to an existing session, continuing its conversation.',
+    summary: 'Send a message to an existing session: a new run when idle, a steer when running.',
     usage: [
       'retriever sessions send <id> [--message <text>|--stdin] [--wait] [--return|--no-return]',
     ],
-    notes: ['A session that is already running rejects a new prompt.'],
-    output: 'The updated session record as JSON.',
+    notes: [
+      'An idle session starts a new run.',
+      'A running session takes the message as a steering prompt, delivered after its current tool calls and before the next model step.',
+      'A backend without a live channel rejects a message while the session runs.',
+      '--wait blocks until a new run finishes; it does not apply to a steer.',
+    ],
+    output: 'The updated session record as JSON; a steered message reports `steer: "queued"`.',
   },
   {
     name: 'sessions list',

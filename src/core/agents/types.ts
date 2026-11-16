@@ -15,6 +15,8 @@ export interface AgentRunner {
   promptAndWait(message: string): Promise<string>;
   waitForSettled(timeoutMs?: number): Promise<void>;
   steer(message: string): Promise<{ disposition: 'started' | 'queued' | 'handled' }>;
+  /** Delivery mode for steering messages; only backends with a live channel implement it. */
+  setSteeringMode?(mode: 'all' | 'one-at-a-time'): Promise<void>;
   getState(): Promise<unknown>;
   getMessages(): Promise<unknown>;
   getContextUsage(): Promise<{ text: string; source: string }>;
@@ -42,6 +44,15 @@ export interface AgentAdapter {
     record: PersonalSessionRecord,
     prompt: string,
   ): AgentProcess | string;
+  /**
+   * A child session that stays addressable while it runs, so a steering message can
+   * reach the live agent. Without it a session is a one-shot process with no channel.
+   */
+  createSessionRunner?(
+    config: AppConfig,
+    profile: AgentProfile,
+    record: PersonalSessionRecord,
+  ): AgentRunner;
 }
 
 export function unsupportedCapability(backend: string, capability: string): Error {

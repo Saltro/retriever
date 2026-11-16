@@ -36,6 +36,12 @@ import {
   writeParentReturnNotification,
 } from '../src/core/sessions/callbacks.js';
 import {
+  enqueueSessionMessage,
+  expireSessionMessages,
+  markSessionMessageDelivered,
+  pendingSessionMessages,
+} from '../src/core/sessions/messages.js';
+import {
   claimSessionRun,
   finishSessionRun,
   finishSessionRunAndReturn,
@@ -618,6 +624,27 @@ if (worker) {
     assert.equal(interrupted.runId, undefined);
     assert.equal(interrupted.pid, undefined);
     if (agentProcessDetached) await testOrphanedGroup(sessions);
+
+    // Steering messages belong to one run token, so a stale note never reaches the next run.
+    const steering = configFor('steering');
+    const first = enqueueSessionMessage(steering, 'busy', 'run-1', '  steer left  ');
+    assert.equal(first.message, 'steer left');
+    assert.equal(pendingSessionMessages(steering, 'busy', 'run-2').length, 0);
+    assert.deepEqual(
+      pendingSessionMessages(steering, 'busy', 'run-1').map((item) => item.message),
+      ['steer left'],
+    );
+    assert.equal(markSessionMessageDelivered(steering, first.id), true);
+    assert.equal(markSessionMessageDelivered(steering, first.id), false);
+    assert.equal(pendingSessionMessages(steering, 'busy', 'run-1').length, 0);
+    enqueueSessionMessage(steering, 'busy', 'run-1', 'second note');
+    assert.equal(expireSessionMessages(steering, 'busy', 'run-1'), 1);
+    assert.equal(pendingSessionMessages(steering, 'busy', 'run-1').length, 0);
+    assert.throws(
+      () => enqueueSessionMessage(steering, 'busy', 'run-1', '   '),
+      /must not be empty/,
+    );
+    closeStateDb(steering);
 
     const binding = configFor('binding');
     assert.equal(ensureVisibleBinding(binding, 'first-chat').chatId, 'first-chat');

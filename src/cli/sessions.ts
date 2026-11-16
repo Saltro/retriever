@@ -1,7 +1,9 @@
 import fs from 'node:fs';
 import { loadConfig } from '../config.js';
+import { sessionAgentCapabilities, sessionAgentProfile } from '../core/agents/registry.js';
 import { detectParentCallback } from '../core/sessions/callbacks.js';
 import { mainSessionRecord } from '../core/sessions/main.js';
+import { enqueueSessionMessage } from '../core/sessions/messages.js';
 import { runSessionPrompt, selectSessionAgent } from '../core/sessions/service.js';
 import { delegatedTaskPrompt } from '../prompts/delegated.js';
 import { formatTable } from './table.js';
@@ -132,6 +134,19 @@ async function sendSession(config: AppConfig, opts: ParsedOptions): Promise<void
   const prompt = await promptFromOptions(opts, 'message');
   if (!prompt) throw new Error('sessions send requires --message or --stdin');
   let record = getSession(config, id);
+  if (record.status === 'running') {
+    if (opts.wait)
+      throw new Error(
+        '--wait does not apply to a running session: the message is steered, not run',
+      );
+    if (!record.runId) throw new Error(`session is running without a run token: ${id}`);
+    const { backend } = sessionAgentProfile(config, record).profile;
+    if (!sessionAgentCapabilities(config, record).steer)
+      throw new Error(`agent backend ${backend} cannot steer into a running session: ${id}`);
+    enqueueSessionMessage(config, record.id, record.runId, prompt);
+    console.log(JSON.stringify({ ...record, steer: 'queued' }, null, 2));
+    return;
+  }
   if (opts.autoReturn !== undefined) record.autoReturn = opts.autoReturn;
   record.parentCallback = detectParentCallback(config) ?? record.parentCallback;
   const task = delegatedTaskPrompt(prompt, {

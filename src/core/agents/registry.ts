@@ -3,7 +3,7 @@ import { withContract } from '../../prompts/system.js';
 import type { AgentProfile, AppConfig } from '../../types.js';
 import { isMainSessionRecord, mainSessionRecord } from '../sessions/main.js';
 import type { PersonalSessionRecord } from '../sessions/registry.js';
-import type { AgentAdapter, AgentRunner } from './types.js';
+import type { AgentAdapter, AgentCapabilities, AgentRunner } from './types.js';
 
 export type { AgentCapabilities, AgentProcess, AgentRunner } from './types.js';
 
@@ -127,20 +127,45 @@ export function sessionAgentProfile(
   return { name: 'legacy', profile: snapshotAgentProfile(config, profile) };
 }
 
-/** The single place a child prompt is built, so the contract cannot be forgotten. */
+/** The single place a child prompt is framed, so the contract cannot be forgotten. */
+export function sessionAgentPrompt(
+  config: AppConfig,
+  record: PersonalSessionRecord,
+  prompt: string,
+): string {
+  const role = isMainSessionRecord(config, record) ? 'main' : 'child';
+  return withContract(config, role, prompt);
+}
+
 export function sessionAgentProcess(
   config: AppConfig,
   record: PersonalSessionRecord,
   prompt: string,
 ) {
   const { profile } = sessionAgentProfile(config, record);
-  const role = isMainSessionRecord(config, record) ? 'main' : 'child';
   return adapterFor(profile.backend).sessionProcess(
     config,
     profile,
     record,
-    withContract(config, role, prompt),
+    sessionAgentPrompt(config, record, prompt),
   );
+}
+
+/** A child that can be driven while it runs; the process backend returns undefined. */
+export function sessionAgentRunner(
+  config: AppConfig,
+  record: PersonalSessionRecord,
+): AgentRunner | undefined {
+  const { profile } = sessionAgentProfile(config, record);
+  return adapterFor(profile.backend).createSessionRunner?.(config, profile, record);
+}
+
+export function sessionAgentCapabilities(
+  config: AppConfig,
+  record: PersonalSessionRecord,
+): AgentCapabilities {
+  const { profile } = sessionAgentProfile(config, record);
+  return adapterFor(profile.backend).sessionCapabilities;
 }
 
 export function mainSessionAgentProfile(

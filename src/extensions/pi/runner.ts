@@ -374,6 +374,12 @@ export class PiRpcRunner {
     return this.command<PromptResponse>('steer', { message });
   }
 
+  /** `all` hands every queued steer over at once instead of one per assistant turn. */
+  async setSteeringMode(mode: 'all' | 'one-at-a-time'): Promise<void> {
+    if (this.config.mock) return;
+    await this.command('set_steering_mode', { mode });
+  }
+
   getState(): Promise<unknown> {
     return this.command('get_state');
   }
