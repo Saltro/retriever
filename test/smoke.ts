@@ -302,7 +302,14 @@ assert.equal(captionRecords[0].text, 'here it is');
 assert.equal(captionRecords[1].msgType, 'file');
 const missingImage = rawSend(['send', '--image', path.join(tmp, 'missing.png')]);
 assert.equal(missingImage.status, 2);
-assert.match(missingImage.stderr, /does not exist/);
+assert.match(missingImage.stderr, /not a readable file/);
+// A flag where a path should be is a usage error, not a file that happens to exist.
+assert.equal(rawSend(['send', '--image', '--long']).status, 2);
+assert.equal(rawSend(['send', '--image', imagePath, '--stdin', 'text']).status, 2);
+// A turn answered with an attachment alone still counts as answered.
+const beforeAttachments = readCurrentContext(config).sendCount;
+assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
+assert.equal(readCurrentContext(config).sendCount, beforeAttachments + 1);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
 fs.writeFileSync(
@@ -576,6 +583,35 @@ assert.deepEqual(
   (({ msgType, threadMessageId }) => ({ msgType, threadMessageId }))(jsonl(outbox).at(-1)),
   { msgType: 'image', threadMessageId: 'om_topic' },
 );
+// A newer message advances the staleness anchor; the reply target must not move
+// with it, or the rest of the answer lands in another topic.
+fs.writeFileSync(
+  `${outbox}.recent`,
+  [
+    { messageId: 'om_newer_topic', createTime: 1_700_000_015_000, text: 'another topic' },
+    { messageId: 'om_topic', createTime: 1_700_000_010_000, text: 'in a topic' },
+  ]
+    .map((message) => JSON.stringify(message))
+    .join('\n'),
+);
+const forced = rawSend(['send', '--force', 'first half']);
+assert.equal(forced.status, 0, forced.stderr);
+assert.equal(jsonl(outbox).at(-1).threadMessageId, 'om_topic');
+assert.equal(readCurrentContext(config).messageId, 'om_newer_topic');
+assert.equal(rawSend(['send', 'second half']).status, 0);
+assert.equal(jsonl(outbox).at(-1).threadMessageId, 'om_topic');
+assert.equal(readCurrentContext(config).turnMessageId, 'om_topic');
+fs.unlinkSync(`${outbox}.recent`);
+
+// A topic from another input chat must not move the visible destination.
+const foreignTopic = feishuMessage('evt-foreign', 'om_foreign', 'elsewhere', 1_700_000_030_000);
+foreignTopic.threadId = 'omt_foreign';
+foreignTopic.chatId = 'oc_other';
+writeCurrentContext(config, foreignTopic);
+assert.equal(rawSend(['send', 'answer in the bound chat']).status, 0);
+assert.equal(jsonl(outbox).at(-1).threadMessageId, undefined);
+assert.equal(jsonl(outbox).at(-1).chatId, 'oc-test');
+
 // Outside a topic the same send stays in the chat stream.
 writeCurrentContext(config, feishuMessage('evt-plain', 'om_plain', 'no topic', 1_700_000_020_000));
 assert.equal(rawSend(['send', 'chat answer']).status, 0);

@@ -6,6 +6,16 @@ export interface FeishuApiResponse {
   data?: unknown;
 }
 
+/** What the sender and the inbound enrichment need from a Feishu API client. */
+export interface FeishuTransport {
+  request<T = FeishuApiResponse>(
+    pathAndQuery: string,
+    options?: { method?: string; json?: unknown; timeoutMs?: number },
+  ): Promise<T>;
+  upload(pathAndQuery: string, form: FormData): Promise<FeishuApiResponse>;
+  download(pathAndQuery: string, maxBytes?: number): Promise<Buffer>;
+}
+
 interface TenantTokenResponse {
   code?: number;
   msg?: string;
@@ -15,8 +25,12 @@ interface TenantTokenResponse {
 
 const BASE_URL = 'https://open.feishu.cn';
 
+/** A stalled request must fail, so the event degrades to a note instead of hanging. */
+const JSON_TIMEOUT_MS = 15_000;
+const TRANSFER_TIMEOUT_MS = 60_000;
+
 /** Caches the tenant token and retries once when the token is the thing that expired. */
-export class FeishuClient {
+export class FeishuClient implements FeishuTransport {
   private token: string | null = null;
   private tokenExpiresAt = 0;
 
@@ -25,7 +39,7 @@ export class FeishuClient {
   /** JSON in, JSON out: the shape of every endpoint except uploads and downloads. */
   async request<T = FeishuApiResponse>(
     pathAndQuery: string,
-    options: { method?: string; json?: unknown } = {},
+    options: { method?: string; json?: unknown; timeoutMs?: number } = {},
   ): Promise<T> {
     const headers: Record<string, string> = {};
     let body: string | undefined;
@@ -33,50 +47,58 @@ export class FeishuClient {
       headers['content-type'] = 'application/json; charset=utf-8';
       body = JSON.stringify(options.json);
     }
-    const response = await this.requestRaw(pathAndQuery, {
-      method: options.method || (body ? 'POST' : 'GET'),
-      headers,
-      body,
-    });
-    const payload = (await response.json().catch(() => ({}))) as FeishuApiResponse;
-    if (!response.ok || payload.code) {
-      throw new Error(
-        `Feishu request failed path=${pathAndQuery} http=${response.status} code=${payload.code ?? 'unknown'} msg=${payload.msg ?? response.statusText}`,
+    return this.withTokenRetry(async () => {
+      const response = await this.send(
+        pathAndQuery,
+        { method: options.method || (body ? 'POST' : 'GET'), headers, body },
+        options.timeoutMs ?? JSON_TIMEOUT_MS,
       );
-    }
-    return payload as T;
+      const payload = (await response.json().catch(() => ({}))) as FeishuApiResponse;
+      fail('request', pathAndQuery, response, payload);
+      return payload as T;
+    });
   }
 
   async upload(pathAndQuery: string, form: FormData): Promise<FeishuApiResponse> {
-    const response = await this.requestRaw(pathAndQuery, { method: 'POST', body: form });
-    const payload = (await response.json().catch(() => ({}))) as FeishuApiResponse;
-    if (!response.ok || payload.code) {
-      throw new Error(
-        `Feishu upload failed path=${pathAndQuery} http=${response.status} code=${payload.code ?? 'unknown'} msg=${payload.msg ?? response.statusText}`,
+    return this.withTokenRetry(async () => {
+      const response = await this.send(
+        pathAndQuery,
+        { method: 'POST', body: form },
+        TRANSFER_TIMEOUT_MS,
       );
-    }
-    return payload;
+      const payload = (await response.json().catch(() => ({}))) as FeishuApiResponse;
+      fail('upload', pathAndQuery, response, payload);
+      return payload;
+    });
   }
 
   /** Message resources answer with the file itself, so the caller reads the body. */
-  async download(pathAndQuery: string): Promise<Buffer> {
-    const response = await this.requestRaw(pathAndQuery);
-    if (!response.ok) {
-      const detail = await response.text().catch(() => '');
-      throw new Error(
-        `Feishu download failed path=${pathAndQuery} http=${response.status} ${detail.slice(0, 200)}`,
-      );
-    }
-    return Buffer.from(await response.arrayBuffer());
+  async download(pathAndQuery: string, maxBytes?: number): Promise<Buffer> {
+    return this.withTokenRetry(async () => {
+      const response = await this.send(pathAndQuery, {}, TRANSFER_TIMEOUT_MS);
+      if (!response.ok) {
+        const detail = await response.text().catch(() => '');
+        throw new Error(
+          `Feishu download failed path=${pathAndQuery} http=${response.status} ${detail.slice(0, 200)}`,
+        );
+      }
+      const declared = Number(response.headers.get('content-length'));
+      if (maxBytes && Number.isFinite(declared) && declared > maxBytes)
+        throw new Error(`too large: declared ${declared} bytes, limit ${maxBytes}`);
+      return Buffer.from(await response.arrayBuffer());
+    });
   }
 
-  async requestRaw(pathAndQuery: string, init: RequestInit = {}): Promise<Response> {
-    return this.withTokenRetry(async () => {
-      const token = await this.getTenantAccessToken();
-      return fetch(`${BASE_URL}${pathAndQuery}`, {
-        ...init,
-        headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}` },
-      });
+  private async send(
+    pathAndQuery: string,
+    init: RequestInit,
+    timeoutMs: number,
+  ): Promise<Response> {
+    const token = await this.getTenantAccessToken();
+    return fetch(`${BASE_URL}${pathAndQuery}`, {
+      ...init,
+      headers: { ...(init.headers as Record<string, string>), authorization: `Bearer ${token}` },
+      signal: AbortSignal.timeout(timeoutMs),
     });
   }
 
@@ -100,6 +122,7 @@ export class FeishuClient {
       method: 'POST',
       headers: { 'content-type': 'application/json; charset=utf-8' },
       body: JSON.stringify({ app_id: this.config.appId, app_secret: this.config.appSecret }),
+      signal: AbortSignal.timeout(JSON_TIMEOUT_MS),
     });
     const body = (await response.json().catch(() => ({}))) as TenantTokenResponse;
     if (!response.ok || body.code || !body.tenant_access_token) {
@@ -111,6 +134,19 @@ export class FeishuClient {
     this.tokenExpiresAt = Date.now() + Math.max(1, body.expire ?? 7200) * 1000;
     return this.token;
   }
+}
+
+/** Feishu reports an expired token in the body of an HTTP 200, so both shapes must fail. */
+function fail(
+  kind: string,
+  pathAndQuery: string,
+  response: Response,
+  payload: FeishuApiResponse,
+): void {
+  if (response.ok && !payload.code) return;
+  throw new Error(
+    `Feishu ${kind} failed path=${pathAndQuery} http=${response.status} code=${payload.code ?? 'unknown'} msg=${payload.msg ?? response.statusText}`,
+  );
 }
 
 function isTokenError(error: unknown): boolean {

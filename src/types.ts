@@ -132,6 +132,11 @@ export interface RuntimeContext {
   eventId: string;
   messageId?: string;
   messageCreateTime?: number;
+  /**
+   * The message that started this turn, kept apart from the staleness anchor so a
+   * `--rebase`/`--force` reply still targets the message the user sent.
+   */
+  turnMessageId?: string;
   /** Set when the event came from a topic thread, so replies stay in it. */
   threadId?: string;
   source: string;

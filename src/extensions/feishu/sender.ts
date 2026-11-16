@@ -9,7 +9,7 @@ import type {
   Sender,
   SenderConfig,
 } from '../../types.js';
-import { type FeishuApiResponse, FeishuClient } from './client.js';
+import { type FeishuApiResponse, FeishuClient, type FeishuTransport } from './client.js';
 import { createTime, messageText } from './normalize.js';
 
 export class MockSender implements Sender {
@@ -92,11 +92,18 @@ interface FeishuListedMessage {
 /** A hung connection must not hold up a reply; the caller falls back to sending. */
 const LIST_TIMEOUT_MS = 3000;
 
-export class FeishuSender implements Sender {
-  private client: FeishuClient;
+/** Feishu caps an image message at 10 MB and a file message at 30 MB. */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
 
-  constructor(private config: FeishuExtensionConfig) {
-    this.client = new FeishuClient(config);
+export class FeishuSender implements Sender {
+  private client: FeishuTransport;
+
+  constructor(
+    private config: FeishuExtensionConfig,
+    client: FeishuTransport = new FeishuClient(config),
+  ) {
+    this.client = client;
   }
 
   async send(reply: OutboundReply): Promise<FeishuApiResponse> {
@@ -114,7 +121,15 @@ export class FeishuSender implements Sender {
     options: { threadMessageId?: string } = {},
   ): Promise<FeishuApiResponse> {
     const name = attachment.name || path.basename(attachment.path);
+    const limit = attachment.kind === 'image' ? MAX_IMAGE_BYTES : MAX_FILE_BYTES;
+    const size = fs.statSync(attachment.path).size;
+    if (size > limit)
+      throw new Error(
+        `${name} is ${size} bytes; Feishu accepts at most ${limit} for a${attachment.kind === 'image' ? 'n image' : ' file'} message`,
+      );
     const data = fs.readFileSync(attachment.path);
+    if (attachment.kind === 'file' && !path.extname(name))
+      throw new Error(`${name} has no file extension; Feishu requires one`);
     const target = { chatId, threadMessageId: options.threadMessageId };
     if (attachment.kind === 'image') {
       const form = new FormData();
@@ -153,15 +168,10 @@ export class FeishuSender implements Sender {
       sort_type: 'ByCreateTimeDesc',
       page_size: String(Math.min(Math.max(limit, 1), 50)),
     });
-    const response = await this.client.requestRaw(`/open-apis/im/v1/messages?${query}`, {
-      signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
-    });
-    const body = (await response.json().catch(() => ({}))) as FeishuApiResponse;
-    if (!response.ok || body.code) {
-      throw new Error(
-        `Feishu message list failed http=${response.status} code=${body.code ?? 'unknown'} msg=${body.msg ?? response.statusText}`,
-      );
-    }
+    const body = await this.client.request<FeishuApiResponse>(
+      `/open-apis/im/v1/messages?${query}`,
+      { timeoutMs: LIST_TIMEOUT_MS },
+    );
     const items = (body.data as { items?: FeishuListedMessage[] } | undefined)?.items || [];
     return items.flatMap((item) => {
       const create = createTime(item);
@@ -234,7 +244,7 @@ function buildReplyCard(reply: OutboundReply): Record<string, unknown> {
   };
 }
 
-export function createSender(config: AppConfig): Sender {
+export function createSender(config: AppConfig, client?: FeishuTransport): Sender {
   if (config.sender?.type === 'mock') return new MockSender(config.sender);
-  return new FeishuSender(config.extensions.feishu);
+  return new FeishuSender(config.extensions.feishu, client);
 }

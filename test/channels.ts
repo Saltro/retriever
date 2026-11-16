@@ -21,12 +21,15 @@ import {
 import { readFeishuChatBinding } from '../src/core/state/binding.js';
 import { readCurrentContext, writeCurrentContext } from '../src/core/state/context.js';
 import { getStateDb } from '../src/core/state/db.js';
+import { attachFeishuResources } from '../src/extensions/feishu/attachments.js';
+import type { FeishuApiResponse, FeishuTransport } from '../src/extensions/feishu/client.js';
 import {
   forwardedTranscript,
   messageResources,
   messageText,
   normalizeFeishuInbound,
 } from '../src/extensions/feishu/normalize.js';
+import { FeishuSender, MockSender } from '../src/extensions/feishu/sender.js';
 import { inboundMessagePrompt } from '../src/prompts/inbound.js';
 import { isSilenceReply } from '../src/prompts/instructions.js';
 import { runtimeContract } from '../src/prompts/system.js';
@@ -265,6 +268,209 @@ writeCurrentContext(topicConfig, topicEvent);
 assert.equal(readCurrentContext(topicConfig).threadId, 'omt_d4be107c616');
 writeCurrentContext(topicConfig, plainThreadless);
 assert.equal(readCurrentContext(topicConfig).threadId, undefined, 'a plain message clears it');
+
+// Inbound enrichment and outbound uploads are request shaping, so they are tested
+// against a fake transport that records the path and body of every call.
+interface Call {
+  kind: 'request' | 'upload' | 'download';
+  path: string;
+  body?: unknown;
+  form?: FormData;
+}
+
+function fakeTransport(options: {
+  items?: unknown[];
+  download?: (path: string) => Buffer;
+  calls: Call[];
+}): FeishuTransport {
+  return {
+    request: async <T = FeishuApiResponse>(
+      path: string,
+      requestOptions: { json?: unknown } = {},
+    ): Promise<T> => {
+      options.calls.push({ kind: 'request', path, body: requestOptions.json });
+      if (path.includes('/messages/om_forward')) return { data: { items: options.items } } as T;
+      return {} as T;
+    },
+    upload: async (path: string, form: FormData) => {
+      options.calls.push({ kind: 'upload', path, form });
+      return {
+        data: path.includes('/images')
+          ? { image_key: 'img_uploaded' }
+          : { file_key: 'file_uploaded' },
+      };
+    },
+    download: async (path: string) => {
+      options.calls.push({ kind: 'download', path });
+      if (options.download) return options.download(path);
+      return Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    },
+  };
+}
+
+const resourceCalls: Call[] = [];
+const resourceConfig: AppConfig = { ...config, stateDir: path.join(tmp, 'resource-state') };
+const imagePost = {
+  title: '',
+  content: [[{ tag: 'img', image_key: 'img_v3_key' }], [{ tag: 'text', text: 'chart' }]],
+};
+const directEvent: InboundEvent = {
+  id: 'evt-direct',
+  source: 'feishu-ws',
+  kind: 'message',
+  chatId: 'oc_direct',
+  text: '[image]chart',
+  raw: {
+    event: {
+      message: {
+        message_id: 'om_direct',
+        message_type: 'post',
+        content: JSON.stringify(imagePost),
+      },
+    },
+  },
+};
+const directEnriched = await attachFeishuResources(
+  resourceConfig,
+  directEvent,
+  fakeTransport({ calls: resourceCalls }),
+);
+assert.equal(directEnriched.attachments?.length, 1);
+assert.match(directEnriched.attachments![0].path, /attachments\/om_direct\/1-image-1\.png$/);
+assert.equal(
+  resourceCalls.find((call) => call.kind === 'download')?.path,
+  '/open-apis/im/v1/messages/om_direct/resources/img_v3_key?type=image',
+);
+
+// A forwarded topic: children are ordered by create time, and their resources are
+// fetched through the container message id, which is the id the API accepts.
+const forwardCalls: Call[] = [];
+const forwardEvent: InboundEvent = {
+  id: 'evt-forward',
+  source: 'feishu-ws',
+  kind: 'message',
+  chatId: 'oc_direct',
+  text: '[forwarded messages]',
+  raw: {
+    message: {
+      message_id: 'om_forward',
+      message_type: 'merge_forward',
+      content: 'Merged and Forwarded Message',
+    },
+  },
+};
+const forwardEnriched = await attachFeishuResources(
+  resourceConfig,
+  forwardEvent,
+  fakeTransport({
+    calls: forwardCalls,
+    items: [
+      { message_id: 'om_forward', msg_type: 'merge_forward' },
+      {
+        message_id: 'om_second',
+        msg_type: 'post',
+        create_time: '2000',
+        upper_message_id: 'om_forward',
+        sender: { id: 'ou_b', sender_type: 'user' },
+        body: { content: JSON.stringify(imagePost) },
+      },
+      {
+        message_id: 'om_first',
+        msg_type: 'text',
+        create_time: '1000',
+        upper_message_id: 'om_forward',
+        sender: { id: 'ou_a', sender_type: 'user' },
+        body: { content: JSON.stringify({ text: 'first note' }) },
+      },
+    ],
+  }),
+);
+assert.equal(
+  forwardEnriched.text,
+  '[forwarded 2 messages]\n1. ou_a: first note\n2. ou_b: [image] chart',
+  'children keep platform order',
+);
+assert.match(
+  forwardCalls.find((call) => call.kind === 'download')?.path ?? '',
+  /\/messages\/om_forward\/resources\/img_v3_key/,
+  'child resources go through the container id',
+);
+assert.equal(forwardEnriched.attachments?.length, 1);
+
+// A failed download leaves a readable note and still delivers the message.
+const failedEnriched = await attachFeishuResources(
+  resourceConfig,
+  directEvent,
+  fakeTransport({
+    calls: [],
+    download: () => {
+      throw new Error('Feishu download failed http=403 no permission');
+    },
+  }),
+);
+assert.equal(failedEnriched.attachments?.length, 0);
+assert.match(failedEnriched.text, /\[image unavailable\]/);
+
+// Audio and video stay placeholders: nothing downloads them.
+assert.deepEqual(messageResources({ message_type: 'media', content: '{"file_key":"file_v"}' }), []);
+assert.equal(messageText({ message_type: 'media', content: '{"file_key":"file_v"}' }), '[video]');
+
+// Outbound: one resource per message, uploaded first and then sent by key.
+const uploadCalls: Call[] = [];
+const feishuSender = new FeishuSender(
+  { appId: 'cli_test', appSecret: 'secret' },
+  fakeTransport({ calls: uploadCalls }),
+);
+const imagePath = path.join(tmp, 'chart.png');
+fs.writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+await feishuSender.sendAttachment('oc_direct', { kind: 'image', path: imagePath });
+assert.deepEqual(
+  uploadCalls.map((call) => [call.kind, call.path]),
+  [
+    ['upload', '/open-apis/im/v1/images'],
+    ['request', '/open-apis/im/v1/messages?receive_id_type=chat_id'],
+  ],
+);
+assert.deepEqual(uploadCalls[1].body, {
+  receive_id: 'oc_direct',
+  msg_type: 'image',
+  content: JSON.stringify({ image_key: 'img_uploaded' }),
+});
+// A topic attachment replies inside the thread instead of starting a new topic.
+uploadCalls.length = 0;
+await feishuSender.sendAttachment(
+  'oc_direct',
+  { kind: 'image', path: imagePath },
+  { threadMessageId: 'om_direct' },
+);
+assert.deepEqual(uploadCalls[1], {
+  kind: 'request',
+  path: '/open-apis/im/v1/messages/om_direct/reply',
+  body: {
+    msg_type: 'image',
+    content: JSON.stringify({ image_key: 'img_uploaded' }),
+    reply_in_thread: true,
+  },
+});
+// A file needs an extension, and Feishu's size cap is checked before uploading.
+await assert.rejects(
+  feishuSender.sendAttachment('oc_direct', {
+    kind: 'file',
+    path: (() => {
+      const file = path.join(tmp, 'no-extension');
+      fs.writeFileSync(file, 'x');
+      return file;
+    })(),
+  }),
+  /no file extension/,
+);
+const oversized = path.join(tmp, 'oversized.png');
+fs.writeFileSync(oversized, Buffer.alloc(10 * 1024 * 1024 + 1));
+await assert.rejects(
+  feishuSender.sendAttachment('oc_direct', { kind: 'image', path: oversized }),
+  /at most 10485760/,
+);
+assert.ok(new MockSender({ type: 'mock', mockOutbox: path.join(tmp, 'unused') }));
 
 const stdinConfig: AppConfig = {
   ...config,

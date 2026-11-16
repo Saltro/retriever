@@ -20,7 +20,7 @@ export const CHAT_REPLY_LIMIT = 200;
 
 export function sendUsage(command = 'retriever send'): never {
   console.error(`Usage: ${command} [--long] [--rebase|--force] <text...> | --stdin
-       ${command} [--image <path>] [--file <path>]... [--long] <text...>
+       ${command} [--image <path>] [--file <path>]... [--long] [--rebase|--force] [<text...>]
 
 The default reply is a chat message of at most ${CHAT_REPLY_LIMIT} characters.
 Split longer answers into a few sends, or pass --long for code, tables or
@@ -51,11 +51,11 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
     const arg = args[index];
     if (arg === '--image' || arg === '--file') {
       const value = args[index + 1];
-      if (!value) sendUsage(command);
+      if (!value || value.startsWith('--')) sendUsage(command);
       index += 1;
       const file = path.resolve(value);
-      if (!fs.existsSync(file)) {
-        console.error(`[${command}] not sent: ${file} does not exist`);
+      if (!fs.existsSync(file) || !fs.statSync(file).isFile()) {
+        console.error(`[${command}] not sent: ${file} is not a readable file`);
         process.exit(2);
       }
       attachments.push({ kind: arg === '--image' ? 'image' : 'file', path: file });
@@ -63,16 +63,11 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
       words.push(arg);
     }
   }
-  let text: string;
-  if (words.length === 1 && words[0] === '--stdin') {
-    text = await readStdin();
-  } else if (words.length > 0) {
-    text = words.join(' ');
-  } else {
-    text = '';
-  }
+  const stdin = words.includes('--stdin');
+  const inline = words.filter((word) => word !== '--stdin');
+  if (stdin && inline.length) sendUsage(command);
+  const text = (stdin ? await readStdin() : inline.join(' ')).trim();
 
-  text = text.trim();
   if (!text && !attachments.length) sendUsage(command);
   const length = [...text].length;
   if (text && !long && length > CHAT_REPLY_LIMIT) {
@@ -95,19 +90,20 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
   const context = tryReadCurrentContext(config);
   if (context)
     await guardConversation(config, channel, chatId, context, { rebase, force }, command);
+  const threadMessageId = replyTarget(context, chatId);
   if (text || !attachments.length)
-    await sendText(config, channel, chatId, context, text, long, command);
+    await sendText(config, channel, chatId, context, text, long, threadMessageId, command);
   for (const attachment of attachments) {
     const sendAttachment = channel.sender.sendAttachment;
     if (!sendAttachment)
       throw new Error(`Channel ${channel.type} cannot send ${attachment.kind} messages.`);
-    await sendAttachment.call(channel.sender, chatId, attachment, {
-      threadMessageId: threadMessageId(context),
-    });
+    await sendAttachment.call(channel.sender, chatId, attachment, { threadMessageId });
     console.error(
       `[${command}] sent ${attachment.kind} chat=${chatId} path=${attachment.path} name=${attachment.name || path.basename(attachment.path)}`,
     );
   }
+  // A reply made only of attachments still ends the turn.
+  if (!text && context) recordSend(config, context, chatId, command);
 }
 
 async function sendText(
@@ -117,29 +113,36 @@ async function sendText(
   context: RuntimeContext | undefined,
   text: string,
   long: boolean,
+  threadMessageId: string | undefined,
   command: string,
 ): Promise<void> {
   await channel.sender.send({
     chatId,
     inReplyTo: context?.eventId || 'manual',
-    threadMessageId: threadMessageId(context),
+    threadMessageId,
     text,
     contextFooter: context?.contextUsage,
     long,
   });
-  if (context) {
-    try {
-      const updated = recordContextSend(config, context.eventId);
-      console.error(
-        `[${command}] sent event=${updated.eventId} chat=${chatId} count=${updated.sendCount}`,
-      );
-    } catch (error) {
-      console.error(
-        `[${command}] sent event=${context.eventId} chat=${chatId}; context accounting warning: ${error instanceof Error ? error.message : String(error)}`,
-      );
-    }
-  } else {
-    console.error(`[${command}] sent event=manual chat=${chatId}`);
+  if (context) recordSend(config, context, chatId, command);
+  else console.error(`[${command}] sent event=manual chat=${chatId}`);
+}
+
+function recordSend(
+  config: ReturnType<typeof loadConfig>,
+  context: RuntimeContext,
+  chatId: string,
+  command: string,
+): void {
+  try {
+    const updated = recordContextSend(config, context.eventId);
+    console.error(
+      `[${command}] sent event=${updated.eventId} chat=${chatId} count=${updated.sendCount}`,
+    );
+  } catch (error) {
+    console.error(
+      `[${command}] sent event=${context.eventId} chat=${chatId}; context accounting warning: ${error instanceof Error ? error.message : String(error)}`,
+    );
   }
 }
 
@@ -198,9 +201,14 @@ async function guardConversation(
   process.exit(3);
 }
 
-/** A topic reply hangs off the message that started the turn, so it lands in that thread. */
-function threadMessageId(context: RuntimeContext | undefined): string | undefined {
-  return context?.threadId && context.messageId ? context.messageId : undefined;
+/**
+ * A topic reply hangs off the message that started the turn — not the staleness
+ * anchor, which moves forward — and only when that thread lives in the bound chat:
+ * a topic from another input chat must not pull the visible destination with it.
+ */
+function replyTarget(context: RuntimeContext | undefined, chatId: string): string | undefined {
+  if (!context?.threadId || !context.turnMessageId || context.chatId !== chatId) return undefined;
+  return context.turnMessageId;
 }
 
 function tryReadCurrentContext(config: ReturnType<typeof loadConfig>) {

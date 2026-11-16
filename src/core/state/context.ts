@@ -8,6 +8,7 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
     eventId: event.id,
     messageId: event.messageId,
     messageCreateTime: event.createTime,
+    turnMessageId: event.messageId,
     threadId: event.threadId,
     source: event.source,
     kind: event.kind,
@@ -17,11 +18,12 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
   };
   const row = getStateDb(config)
     .prepare(`INSERT INTO current_context
-    (singleton, chatId, eventId, messageId, messageCreateTime, threadId, source, kind, textChars, startedAt, sendCount)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    (singleton, chatId, eventId, messageId, messageCreateTime, turnMessageId, threadId, source, kind, textChars, startedAt, sendCount)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(singleton) DO UPDATE SET chatId=excluded.chatId, eventId=excluded.eventId,
       messageId=excluded.messageId, messageCreateTime=excluded.messageCreateTime,
-      threadId=excluded.threadId, source=excluded.source, kind=excluded.kind,
+      turnMessageId=excluded.turnMessageId, threadId=excluded.threadId,
+      source=excluded.source, kind=excluded.kind,
       textChars=excluded.textChars, startedAt=excluded.startedAt, sendCount=0,
       lastSentAt=NULL, contextUsage=NULL, contextUsageSource=NULL RETURNING *`)
     .get(
@@ -29,6 +31,7 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
       context.eventId,
       context.messageId ?? null,
       context.messageCreateTime ?? null,
+      context.turnMessageId ?? null,
       context.threadId ?? null,
       context.source,
       context.kind,
@@ -45,7 +48,10 @@ export function readCurrentContext(config: AppConfig): RuntimeContext {
   return decodeStateRow<RuntimeContext>(row, contextFields);
 }
 
-/** Moves only the staleness anchor forward; event identity and counters stay put. */
+/**
+ * Moves only the staleness anchor forward; event identity, the turn's own message
+ * and counters stay put, so the rest of a split reply still targets the right thread.
+ */
 export function advanceContextAnchor(
   config: AppConfig,
   reference: { messageId: string; messageCreateTime: number },

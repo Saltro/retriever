@@ -124,13 +124,9 @@ export function messageText(message: { message_type?: string; content?: unknown 
       return message.content;
     }
   }
+  if (typeof message.content !== 'string') return JSON.stringify(message.content ?? message);
   // Resources are described by a placeholder; the local file path arrives in the prompt.
-  if (typeof message.content === 'string') {
-    const placeholder = placeholderText(message.message_type, message.content);
-    if (placeholder) return placeholder;
-  }
-  if (typeof message.content === 'string') return message.content;
-  return JSON.stringify(message.content ?? message);
+  return placeholderText(message.message_type, message.content) ?? message.content;
 }
 
 /** A message body the agent can still interpret when the payload itself is not text. */
@@ -156,7 +152,8 @@ function stringField(content: string, field: string): string | undefined {
   }
 }
 
-/** An image or document key the channel has to fetch before the agent can see it. */ export interface MessageResource {
+/** An image or document key the channel has to fetch before the agent can see it. */
+export interface MessageResource {
   kind: 'image' | 'file';
   key: string;
   name?: string;
@@ -178,7 +175,6 @@ export function messageResources(message: {
     case 'image':
       return resource(content.image_key, 'image');
     case 'file':
-    case 'media':
       return resource(content.file_key, 'file', content.file_name);
     case 'post': {
       const locale = (Object.values(content).find(isRecord) ?? content) as { content?: unknown };
@@ -186,7 +182,6 @@ export function messageResources(message: {
       const inline = nodes.flatMap((node) => {
         if (!isRecord(node)) return [];
         if (node.tag === 'img') return resource(node.image_key, 'image');
-        if (node.tag === 'media') return resource(node.file_key, 'file', node.file_name);
         return [];
       });
       return [...inline, ...postFiles(content).map((file) => file.resource)];
@@ -220,6 +215,7 @@ function postFiles(content: Record<string, unknown>): Array<{
 export interface ForwardedMessage {
   message_id?: string;
   msg_type?: string;
+  create_time?: string;
   body?: { content?: string };
   sender?: { id?: string; sender_type?: string };
   upper_message_id?: string;

@@ -135,11 +135,13 @@ retriever send --file ./report.pdf
 printf 'longer reply' | retriever send --stdin
 ```
 
-An incoming image or document is downloaded to `<stateDir>/attachments/<message id>/` before delivery, and the prompt lists the local path, so the agent opens it with the same tools it uses on any file. `--image` and `--file` upload a local path and send it as its own message; repeat the flag for several files. Text on the same command arrives first, as the caption.
+An incoming image or document is downloaded to `<stateDir>/attachments/<message id>/` before delivery, and the prompt lists the local path, so the agent opens it with the same tools it uses on any file. `--image` and `--file` upload a local path and send it as its own message; repeat the flag for several files. Text on the same command arrives first, as the caption. Message directories older than seven days are pruned when the daemon starts.
+
+Inbound resources are capped at 30 MB; outbound uploads are checked against Feishu's limits (10 MB for an image message, 30 MB for a file message, and a file needs an extension) before anything is sent. Audio, video and stickers arrive as `[audio]`, `[video]` and `[sticker]` placeholders and are never downloaded. A resource that cannot be fetched becomes a note in the message text — `[image: chart.png too large]`, `[file: report.pdf unavailable]` — and the message is delivered anyway.
 
 A forwarded topic or a merged forward arrives as the fixed string `Merged and Forwarded Message`, so the channel fetches its child messages with the get-message API and renders them as a numbered transcript, sender and all, downloading the images and documents inside. Reading other messages' content needs `im:message:readonly` (or `im:message`) in addition to `im:resource`.
 
-A message that belongs to a Feishu topic thread is answered inside that thread: replies and attachments go through the reply API with `reply_in_thread`, so a topic group keeps one conversation per topic instead of a new topic per answer. Messages in the chat stream keep getting top-level replies. In a topic group the chat-level message list only returns topic roots, so the newer-messages check sees roots only; it may miss an interruption inside a thread, never invent one.
+A message that belongs to a Feishu topic thread is answered inside that thread: replies and attachments go through the reply API with `reply_in_thread`, so a topic group keeps one conversation per topic instead of a new topic per answer. Messages in the chat stream keep getting top-level replies. The thread reply is used only while the topic lives in the bound output chat; a topic from another input chat is answered in the bound chat so the visible destination stays fixed. In a topic group the chat-level message list only returns topic roots, so the newer-messages check sees roots only; it may miss an interruption inside a thread, never invent one.
 
 A send holds at most 200 characters unless `--long` is passed, so a default answer arrives as a few chat messages instead of one wall of text. A normal send is a plain chat message rendered from markdown with the context estimate as an italic last line; `--long` keeps the card for code, tables and anything that has to arrive as one message.
 
@@ -210,7 +212,7 @@ First database access imports existing daemon JSON state transactionally and onc
 - `feishu-chat-binding.json`
 - existing `session-callbacks` notices
 
-Before deploying this migration, stop the old daemon and all old state-writing CLI/watchers. Keep the same state directory and verify the new records with CLI status/list commands. Malformed legacy state fails import with an error rather than being silently discarded. Source JSON files are retained; new code does not dual-write them. Do not keep old and new writers running together. Schema version 4 adds the platform create time that anchors a reply to the message its turn was based on. Version 3 renamed the automatic-return field while preserving existing session settings. Old JSON fields are accepted only during import, not as CLI aliases.
+Before deploying this migration, stop the old daemon and all old state-writing CLI/watchers. Keep the same state directory and verify the new records with CLI status/list commands. Malformed legacy state fails import with an error rather than being silently discarded. Source JSON files are retained; new code does not dual-write them. Do not keep old and new writers running together. Schema version 6 adds the message that started a turn, kept apart from the staleness anchor so a `--force` reply still targets the right topic; version 5 added the topic thread id. Schema version 4 adds the platform create time that anchors a reply to the message its turn was based on. Version 3 renamed the automatic-return field while preserving existing session settings. Old JSON fields are accepted only during import, not as CLI aliases.
 
 Logs, config, and Pi-native history/memory/skills remain files. Runtime SQL transactions never wait on model execution, spawn, RPC, or network calls. No real cache migration is performed by the test suite.
 
@@ -267,7 +269,8 @@ src/
     index.ts               registers both groups; used by the daemon and CLI
     agents.ts              agent-only registration for the session supervisor
     channels.ts            channel-only registration
-    feishu/                channel, WebSocket receiver, sender, normalization
+    feishu/                channel, WebSocket receiver, sender, normalization,
+                         API client, inbound attachment and forward expansion
     stdin/                 terminal channel
     pi/                    adapter and JSON-lines RPC runner
     process/               external harness adapter
@@ -279,4 +282,4 @@ test/                      storage, process lifecycle, backend/channel, session 
 
 ## Remaining limits
 
-One daemon is supported per state directory; there is no multi-daemon lease system. Ordinary incoming events still queue in memory and can be lost on exit; persisted callbacks have the retry policy above. Unix harness cancellation covers the owned process group; a harness that deliberately creates a separate detached group is outside that guarantee. Feishu supports markdown messages, cards and reactions, not full attachment/media workflows. There is no arbitrary parent-session router, hot-loaded plugin system, or backend-history migration.
+One daemon is supported per state directory; there is no multi-daemon lease system. Ordinary incoming events still queue in memory and can be lost on exit; persisted callbacks have the retry policy above. Unix harness cancellation covers the owned process group; a harness that deliberately creates a separate detached group is outside that guarantee. Feishu covers markdown messages, cards, reactions, images, documents and topic threads; audio and video arrive as placeholders, and nothing transcribes or plays them. There is no arbitrary parent-session router, hot-loaded plugin system, or backend-history migration.
