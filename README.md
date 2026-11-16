@@ -88,7 +88,7 @@ Common overrides: `RETRIEVER_WORKSPACE_DIR`, `RETRIEVER_CHANNEL`, `PI_BIN`, `RET
 
 ### Channel adapters
 
-- **`feishu`** (default): Feishu WebSocket receiver, markdown chat-message and card sender, and reactions. Needs `extensions.feishu.appId` and `appSecret`.
+- **`feishu`** (default): Feishu WebSocket receiver, markdown chat-message and card sender, image and file upload, reactions, and inbound image/document download. Needs `extensions.feishu.appId` and `appSecret`, and the app must hold the `im:resource` permission.
 - **`stdin`**: reads plain text or JSON lines from stdin and prints replies to stdout; no Feishu receiver, card, or reaction. Useful for local pipelines and debugging.
 
 The static registry in `src/core/channels/registry.ts` defines the adapter boundary: receiver lifecycle, sender, binding behavior, and dedupe. Implementations live in `src/extensions/` and are registered once by `src/extensions/channels.ts`. Registration is compiled in, so every entry bundle loads the same adapters; there is no dynamic plugin loader or multi-chat routing.
@@ -130,8 +130,16 @@ retriever bind feishu-chat --chat-id oc_xxx
 retriever bind status
 retriever send 'hello from the chat'
 retriever send --long 'a table that must arrive as one message'
+retriever send --image ./chart.png 'look at this'
+retriever send --file ./report.pdf
 printf 'longer reply' | retriever send --stdin
 ```
+
+An incoming image or document is downloaded to `<stateDir>/attachments/<message id>/` before delivery, and the prompt lists the local path, so the agent opens it with the same tools it uses on any file. `--image` and `--file` upload a local path and send it as its own message; repeat the flag for several files. Text on the same command arrives first, as the caption.
+
+A forwarded topic or a merged forward arrives as the fixed string `Merged and Forwarded Message`, so the channel fetches its child messages with the get-message API and renders them as a numbered transcript, sender and all, downloading the images and documents inside. Reading other messages' content needs `im:message:readonly` (or `im:message`) in addition to `im:resource`.
+
+A message that belongs to a Feishu topic thread is answered inside that thread: replies and attachments go through the reply API with `reply_in_thread`, so a topic group keeps one conversation per topic instead of a new topic per answer. Messages in the chat stream keep getting top-level replies. In a topic group the chat-level message list only returns topic roots, so the newer-messages check sees roots only; it may miss an interruption inside a thread, never invent one.
 
 A send holds at most 200 characters unless `--long` is passed, so a default answer arrives as a few chat messages instead of one wall of text. A normal send is a plain chat message rendered from markdown with the context estimate as an italic last line; `--long` keeps the card for code, tables and anything that has to arrive as one message.
 

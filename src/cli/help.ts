@@ -19,6 +19,7 @@ export const COMMANDS: CommandHelp[] = [
     usage: [
       'retriever send [--long] [--rebase|--force] <text...>',
       'retriever send [--long] [--rebase|--force] --stdin',
+      'retriever send [--image <path>] [--file <path>]... [<caption...>]',
     ],
     notes: [
       'Bound to the current event; no chat id is needed.',
@@ -26,6 +27,7 @@ export const COMMANDS: CommandHelp[] = [
       `Default limit is ${CHAT_REPLY_LIMIT} characters: split longer answers into a few sends, which reads more like a conversation.`,
       'A normal reply is a chat message rendered from markdown, with the context estimate as an italic last line.',
       '--long lifts the limit and switches to a card, for code, tables or anything that must arrive as one message.',
+      '--image and --file upload a local path and send it as its own message; repeat the flag for several files, and pass text for a caption.',
       'If newer messages arrived while you were composing, the send is refused with their text: --rebase when the reply already accounts for them, --force when they do not affect it.',
     ],
     output:

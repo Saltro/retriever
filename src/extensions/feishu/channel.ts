@@ -1,6 +1,7 @@
 import type { ChannelAdapter } from '../../core/channels/registry.js';
 import { ensureFeishuChatBinding, readFeishuChatBinding } from '../../core/state/binding.js';
 import type { AppConfig, InboundEvent, Sender } from '../../types.js';
+import { attachFeishuResources } from './attachments.js';
 import { createSender } from './sender.js';
 import { startFeishuWsReceiver } from './ws.js';
 
@@ -17,7 +18,10 @@ export class FeishuChannel implements ChannelAdapter {
 
   async start(onEvent: (event: InboundEvent) => Promise<void>): Promise<void> {
     if (this.closed) return;
-    const ws = await startFeishuWsReceiver(this.config, onEvent);
+    // Images and documents arrive as keys; they become local files before delivery.
+    const ws = await startFeishuWsReceiver(this.config, async (event) =>
+      onEvent(await attachFeishuResources(this.config, event)),
+    );
     if (this.closed) ws?.close({ force: true });
     else this.ws = ws;
   }

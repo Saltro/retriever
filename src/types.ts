@@ -62,6 +62,14 @@ export interface AppConfig {
   sender?: SenderConfig;
 }
 
+/** An image or document moved out of the chat and onto this machine. */
+export interface Attachment {
+  kind: 'image' | 'file';
+  /** Absolute local path the agent can read. */
+  path: string;
+  name?: string;
+}
+
 export interface InboundEvent {
   id: string;
   source: string;
@@ -71,7 +79,11 @@ export interface InboundEvent {
   messageId?: string;
   /** Platform creation time in epoch milliseconds, when the channel provides one. */
   createTime?: number;
+  /** Topic thread the message belongs to; only platforms with topics set it. */
+  threadId?: string;
   text: string;
+  /** Resources the channel downloaded for this message, in arrival order. */
+  attachments?: Attachment[];
   /**
    * Set by producers whose event carries its own semantics (scheduled wake, child completion).
    * Plain channel messages leave it empty and get framed with the channel label instead.
@@ -83,6 +95,8 @@ export interface InboundEvent {
 export interface OutboundReply {
   chatId: string;
   inReplyTo: string;
+  /** Message whose topic thread the reply belongs in; absent means the chat stream. */
+  threadMessageId?: string;
   text: string;
   contextFooter?: string;
   /** Long output arrives as a card; a normal reply stays a plain chat message. */
@@ -102,6 +116,12 @@ export interface RecentMessage {
 
 export interface Sender {
   send(reply: OutboundReply): Promise<unknown>;
+  /** One image or document per message; the chat platform decides how it renders. */
+  sendAttachment?(
+    chatId: string,
+    attachment: Attachment,
+    options?: { threadMessageId?: string },
+  ): Promise<unknown>;
   addReaction?(messageId: string, emojiType: string): Promise<unknown>;
   /** Newest messages in the chat, for detecting that a reply is behind the conversation. */
   recentMessages?(chatId: string, limit: number): Promise<RecentMessage[]>;
@@ -112,6 +132,8 @@ export interface RuntimeContext {
   eventId: string;
   messageId?: string;
   messageCreateTime?: number;
+  /** Set when the event came from a topic thread, so replies stay in it. */
+  threadId?: string;
   source: string;
   kind: InboundEvent['kind'];
   textChars: number;

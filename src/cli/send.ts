@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { loadConfig } from '../config.js';
 import { createChannelAdapter } from '../core/channels/registry.js';
 import {
@@ -11,17 +13,21 @@ import {
   readCurrentContext,
   recordContextSend,
 } from '../core/state/context.js';
-import type { RecentMessage, RuntimeContext } from '../types.js';
+import type { Attachment, RecentMessage, RuntimeContext } from '../types.js';
 
 /** Long enough for a chat-style reply, short enough to keep the conversation readable. */
 export const CHAT_REPLY_LIMIT = 200;
 
 export function sendUsage(command = 'retriever send'): never {
   console.error(`Usage: ${command} [--long] [--rebase|--force] <text...> | --stdin
+       ${command} [--image <path>] [--file <path>]... [--long] <text...>
 
 The default reply is a chat message of at most ${CHAT_REPLY_LIMIT} characters.
 Split longer answers into a few sends, or pass --long for code, tables or
 anything that has to arrive as one message.
+
+--image and --file upload a local file and send it as its own message; repeat
+the flag for several, and add text for a caption.
 
 --rebase  newer messages arrived; this text already accounts for them
 --force   newer messages arrived; they do not affect this reply`);
@@ -39,20 +45,37 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
   const long = args.includes('--long');
   const rebase = args.includes('--rebase');
   const force = args.includes('--force');
-  const words = args.filter((arg) => !['--long', '--rebase', '--force'].includes(arg));
+  const words: string[] = [];
+  const attachments: Attachment[] = [];
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === '--image' || arg === '--file') {
+      const value = args[index + 1];
+      if (!value) sendUsage(command);
+      index += 1;
+      const file = path.resolve(value);
+      if (!fs.existsSync(file)) {
+        console.error(`[${command}] not sent: ${file} does not exist`);
+        process.exit(2);
+      }
+      attachments.push({ kind: arg === '--image' ? 'image' : 'file', path: file });
+    } else if (!['--long', '--rebase', '--force'].includes(arg)) {
+      words.push(arg);
+    }
+  }
   let text: string;
   if (words.length === 1 && words[0] === '--stdin') {
     text = await readStdin();
   } else if (words.length > 0) {
     text = words.join(' ');
   } else {
-    sendUsage(command);
+    text = '';
   }
 
   text = text.trim();
-  if (!text) sendUsage(command);
+  if (!text && !attachments.length) sendUsage(command);
   const length = [...text].length;
-  if (!long && length > CHAT_REPLY_LIMIT) {
+  if (text && !long && length > CHAT_REPLY_LIMIT) {
     console.error(
       `[${command}] not sent: ${length} characters exceeds the ${CHAT_REPLY_LIMIT}-character chat limit.\n` +
         'Split it into a few shorter sends the way you would in a conversation,\n' +
@@ -72,9 +95,34 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
   const context = tryReadCurrentContext(config);
   if (context)
     await guardConversation(config, channel, chatId, context, { rebase, force }, command);
+  if (text || !attachments.length)
+    await sendText(config, channel, chatId, context, text, long, command);
+  for (const attachment of attachments) {
+    const sendAttachment = channel.sender.sendAttachment;
+    if (!sendAttachment)
+      throw new Error(`Channel ${channel.type} cannot send ${attachment.kind} messages.`);
+    await sendAttachment.call(channel.sender, chatId, attachment, {
+      threadMessageId: threadMessageId(context),
+    });
+    console.error(
+      `[${command}] sent ${attachment.kind} chat=${chatId} path=${attachment.path} name=${attachment.name || path.basename(attachment.path)}`,
+    );
+  }
+}
+
+async function sendText(
+  config: ReturnType<typeof loadConfig>,
+  channel: ReturnType<typeof createChannelAdapter>,
+  chatId: string,
+  context: RuntimeContext | undefined,
+  text: string,
+  long: boolean,
+  command: string,
+): Promise<void> {
   await channel.sender.send({
     chatId,
     inReplyTo: context?.eventId || 'manual',
+    threadMessageId: threadMessageId(context),
     text,
     contextFooter: context?.contextUsage,
     long,
@@ -148,6 +196,11 @@ async function guardConversation(
     ].join('\n'),
   );
   process.exit(3);
+}
+
+/** A topic reply hangs off the message that started the turn, so it lands in that thread. */
+function threadMessageId(context: RuntimeContext | undefined): string | undefined {
+  return context?.threadId && context.messageId ? context.messageId : undefined;
 }
 
 function tryReadCurrentContext(config: ReturnType<typeof loadConfig>) {

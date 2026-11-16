@@ -19,12 +19,18 @@ import {
   writeParentReturnNotification,
 } from '../src/core/sessions/callbacks.js';
 import { readFeishuChatBinding } from '../src/core/state/binding.js';
-import { readCurrentContext } from '../src/core/state/context.js';
+import { readCurrentContext, writeCurrentContext } from '../src/core/state/context.js';
 import { getStateDb } from '../src/core/state/db.js';
+import {
+  forwardedTranscript,
+  messageResources,
+  messageText,
+  normalizeFeishuInbound,
+} from '../src/extensions/feishu/normalize.js';
 import { inboundMessagePrompt } from '../src/prompts/inbound.js';
 import { isSilenceReply } from '../src/prompts/instructions.js';
 import { runtimeContract } from '../src/prompts/system.js';
-import type { AppConfig, OutboundReply } from '../src/types.js';
+import type { AppConfig, InboundEvent, OutboundReply } from '../src/types.js';
 
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pi-channels-'));
 const config: AppConfig = {
@@ -110,6 +116,155 @@ assert.doesNotMatch(inboundMessagePrompt(plainInbound, 'terminal', true), /respo
 assert.equal(isSilenceReply(' NO_REPLY\n'), true);
 assert.equal(isSilenceReply('NO_REPLY.'), false);
 assert.equal(isSilenceReply('all done NO_REPLY'), false);
+
+// Images and documents: a placeholder stands in for the payload, and the prompt
+// carries the local path once the channel has downloaded the resource.
+const imageMessage = {
+  message_id: 'om_image',
+  chat_id: 'oc-media',
+  message_type: 'image',
+  create_time: '1700000000000',
+  content: JSON.stringify({ image_key: 'img_v2_key' }),
+};
+const imageEvent = normalizeFeishuInbound(
+  { header: { event_id: 'evt-image' }, event: { message: imageMessage } },
+  'feishu-ws',
+);
+assert.equal(imageEvent.text, '[image]');
+assert.equal(imageEvent.attachments, undefined, 'normalizing never touches the network');
+assert.deepEqual(messageResources(imageMessage), [
+  { kind: 'image', key: 'img_v2_key', name: undefined },
+]);
+const fileMessage = {
+  message_type: 'file',
+  content: JSON.stringify({ file_key: 'file_v2_key', file_name: 'report.pdf' }),
+};
+assert.equal(messageText(fileMessage), '[file: report.pdf]');
+assert.deepEqual(messageResources(fileMessage), [
+  { kind: 'file', key: 'file_v2_key', name: 'report.pdf' },
+]);
+const postContent = {
+  message_type: 'post',
+  content: JSON.stringify({
+    zh_cn: {
+      title: 'chart',
+      content: [
+        [{ tag: 'text', text: 'look at this ' }],
+        [{ tag: 'img', image_key: 'img_v2_inpost' }],
+      ],
+    },
+  }),
+};
+assert.equal(messageText(postContent), 'chart\nlook at this\n[image]');
+assert.deepEqual(messageResources(postContent), [
+  { kind: 'image', key: 'img_v2_inpost', name: undefined },
+]);
+// A document attached to a rich-text message sits in a sibling `files` array.
+const postFileContent = {
+  message_type: 'post',
+  content: JSON.stringify({
+    title: '',
+    content: [[{ tag: 'text', text: '发文件', style: [] }]],
+    files: [{ file_key: 'file_v3_pdf', file_name: 'report.pdf', is_folder: false }],
+  }),
+};
+assert.equal(messageText(postFileContent), '发文件\n[file: report.pdf]');
+assert.deepEqual(messageResources(postFileContent), [
+  { kind: 'file', key: 'file_v3_pdf', name: 'report.pdf' },
+]);
+// A forwarded topic or merged forward only carries a fixed placeholder; the
+// transcript comes from the get-message API, one line per message.
+assert.equal(
+  messageText({ message_type: 'merge_forward', content: 'Merged and Forwarded Message' }),
+  '[forwarded messages]',
+);
+assert.equal(
+  forwardedTranscript([
+    {
+      message_id: 'om_child_1',
+      msg_type: 'text',
+      body: { content: JSON.stringify({ text: 'the cache is warm\nnow' }) },
+      sender: { id: 'ou_speaker', sender_type: 'user' },
+      upper_message_id: 'om_forward',
+    },
+    {
+      message_id: 'om_child_2',
+      msg_type: 'image',
+      body: { content: JSON.stringify({ image_key: 'img_v2_child' }) },
+      sender: { id: 'cli_app', sender_type: 'app' },
+      upper_message_id: 'om_forward',
+    },
+  ]),
+  '[forwarded 2 messages]\n1. ou_speaker: the cache is warm now\n2. bot: [image]',
+);
+const downloaded: InboundEvent = {
+  ...imageEvent,
+  text: '',
+  attachments: [{ kind: 'image', path: path.join(tmp, 'attachments', '1-photo.png') }],
+};
+assert.match(
+  inboundMessagePrompt(downloaded, 'Feishu', true),
+  /<attachment kind="image" path="[^"]*1-photo\.png">/,
+);
+const attachmentPrompts: string[] = [];
+const attachmentConfig: AppConfig = { ...config, stateDir: path.join(tmp, 'attachment-state') };
+const attachmentRunner = createMainAgentRunner(attachmentConfig);
+Object.assign(attachmentRunner, {
+  promptAndWait: async (prompt: string) => {
+    attachmentPrompts.push(prompt);
+    return '';
+  },
+});
+const attachmentDaemon = new PersonalDaemon(attachmentConfig, { runner: attachmentRunner });
+await attachmentDaemon.enqueue(downloaded);
+assert.ok(
+  attachmentPrompts.some((prompt) => prompt.includes('1-photo.png')),
+  'an image with no caption is still a task',
+);
+attachmentDaemon.stop();
+
+// Topic messages: the thread id survives into the current context, so a reply is
+// sent back into that thread instead of starting a new topic.
+const topicEvent = normalizeFeishuInbound(
+  {
+    header: { event_id: 'evt-topic' },
+    event: {
+      message: {
+        message_id: 'om_topic',
+        chat_id: 'oc-topic',
+        message_type: 'text',
+        create_time: '1700000000000',
+        thread_id: 'omt_d4be107c616',
+        content: JSON.stringify({ text: 'in a topic' }),
+      },
+    },
+  },
+  'feishu-ws',
+);
+assert.equal(topicEvent.threadId, 'omt_d4be107c616');
+assert.match(inboundMessagePrompt(topicEvent, 'Feishu', true), /thread="omt_d4be107c616"/);
+assert.doesNotMatch(inboundMessagePrompt(plainInbound, 'Feishu', true), /thread=/);
+const plainThreadless = normalizeFeishuInbound(
+  {
+    header: { event_id: 'evt-plain' },
+    event: {
+      message: {
+        message_id: 'om_plain',
+        chat_id: 'oc-topic',
+        message_type: 'text',
+        create_time: '1700000000000',
+        content: JSON.stringify({ text: 'quote reply, no topic' }),
+      },
+    },
+  },
+  'feishu-ws',
+);
+assert.equal(plainThreadless.threadId, undefined, 'root_id alone is not a topic');
+const topicConfig: AppConfig = { ...config, stateDir: path.join(tmp, 'topic-state') };
+writeCurrentContext(topicConfig, topicEvent);
+assert.equal(readCurrentContext(topicConfig).threadId, 'omt_d4be107c616');
+writeCurrentContext(topicConfig, plainThreadless);
+assert.equal(readCurrentContext(topicConfig).threadId, undefined, 'a plain message clears it');
 
 const stdinConfig: AppConfig = {
   ...config,

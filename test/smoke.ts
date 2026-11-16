@@ -286,6 +286,23 @@ assert.equal(oversize.status, 2);
 assert.match(oversize.stderr, /exceeds the 200-character chat limit/);
 assert.match(oversize.stderr, /--long/);
 assert.equal(rawSend(['send', '--long', longReply]).status, 0);
+// Attachments travel as their own message: a path is uploaded, not inlined in the text.
+const imagePath = path.join(tmp, 'figure.png');
+fs.writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+const documentPath = path.join(tmp, 'notes.txt');
+fs.writeFileSync(documentPath, 'notes');
+assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
+const imageRecord = jsonl(outbox).at(-1);
+assert.equal(imageRecord.transport, 'mock-attachment');
+assert.equal(imageRecord.msgType, 'image');
+assert.equal(imageRecord.attachment.path, imagePath);
+assert.equal(rawSend(['send', '--file', documentPath, 'here it is']).status, 0);
+const captionRecords = jsonl(outbox).slice(-2);
+assert.equal(captionRecords[0].text, 'here it is');
+assert.equal(captionRecords[1].msgType, 'file');
+const missingImage = rawSend(['send', '--image', path.join(tmp, 'missing.png')]);
+assert.equal(missingImage.status, 2);
+assert.match(missingImage.stderr, /does not exist/);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
 fs.writeFileSync(
@@ -547,6 +564,22 @@ assert.equal(rawSend(['send', 'and the second half of the answer']).status, 0);
 assert.equal(readCurrentContext(config).messageId, 'om_newer');
 fs.unlinkSync(`${outbox}.recent`);
 assert.equal(rawSend(['send', 'no newer messages now']).status, 0);
+// In a topic group a top-level send would start a new topic, so the reply and any
+// attachment hang off the message that started the turn.
+const topicEvent = feishuMessage('evt-topic', 'om_topic', 'in a topic', 1_700_000_010_000);
+topicEvent.threadId = 'omt_d4be107c616';
+writeCurrentContext(config, topicEvent);
+assert.equal(rawSend(['send', 'topic answer']).status, 0);
+assert.equal(jsonl(outbox).at(-1).threadMessageId, 'om_topic');
+assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
+assert.deepEqual(
+  (({ msgType, threadMessageId }) => ({ msgType, threadMessageId }))(jsonl(outbox).at(-1)),
+  { msgType: 'image', threadMessageId: 'om_topic' },
+);
+// Outside a topic the same send stays in the chat stream.
+writeCurrentContext(config, feishuMessage('evt-plain', 'om_plain', 'no topic', 1_700_000_020_000));
+assert.equal(rawSend(['send', 'chat answer']).status, 0);
+assert.equal(jsonl(outbox).at(-1).threadMessageId, undefined);
 
 console.log('smoke ok', outbox);
 

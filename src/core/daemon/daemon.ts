@@ -128,7 +128,7 @@ export class PersonalDaemon {
   }
 
   async handleEvent(event: InboundEvent): Promise<void> {
-    if (!event.text?.trim()) return;
+    if (!event.text?.trim() && !event.attachments?.length) return;
     console.error(
       `[daemon] event ${event.id} kind=${event.kind} chat=${event.chatId} text_chars=${event.text.length}`,
     );

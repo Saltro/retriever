@@ -196,12 +196,13 @@ if (worker) {
     assert.equal(getCron(legacy, 'legacy-cron').prompt, 'wake');
     assert.equal(readFeishuChatBinding(legacy)?.chatId, 'visible-fixed');
     assert.deepEqual(listParentNotifications(legacy), [legacyNotice]);
-    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 5);
     const contextColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(current_context)')
       .all()
       .map((column) => column.name);
     assert.ok(contextColumns.includes('messageCreateTime'));
+    assert.ok(contextColumns.includes('threadId'));
     const freshColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(sessions)')
       .all()
@@ -325,8 +326,8 @@ if (worker) {
       const migratedDb = getStateDb(migration);
       assert.equal(
         migratedDb.prepare('PRAGMA user_version').get()?.user_version,
-        4,
-        `v${version} migrates to v4`,
+        5,
+        `v${version} migrates to v5`,
       );
       const migratedColumns = migratedDb
         .prepare('PRAGMA table_info(sessions)')
@@ -385,8 +386,8 @@ if (worker) {
       closeStateDb(migration);
       assert.equal(
         getStateDb(migration).prepare('PRAGMA user_version').get()?.user_version,
-        4,
-        'v4 schema reopens without repeated ALTER',
+        5,
+        'v5 schema reopens without repeated ALTER',
       );
       for (const value of [0, 1])
         assert.equal(getSession(migration, migratedIds[value]).autoReturn, Boolean(value));

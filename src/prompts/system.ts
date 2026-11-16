@@ -76,6 +76,13 @@ messages read like a conversation, one wall of text does not. Send the rest as
 follow-up messages instead of cramming. Pass \`--long\` when the content has to
 arrive as a single message: code, a table, an answer that cannot be split.
 
+### Images and files
+
+An incoming image or document arrives already downloaded, and its local path is
+part of the message: open that path with your usual tools. To send one back, pass
+the path to \`retriever send --image <path>\` or \`retriever send --file <path>\`.
+Each file is its own message; text on the same command arrives first as a caption.
+
 \`retriever return --stdin\` delivers text to the parent session that delegated to
 you.
 

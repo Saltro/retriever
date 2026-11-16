@@ -8,6 +8,7 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
     eventId: event.id,
     messageId: event.messageId,
     messageCreateTime: event.createTime,
+    threadId: event.threadId,
     source: event.source,
     kind: event.kind,
     textChars: event.text.length,
@@ -16,11 +17,11 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
   };
   const row = getStateDb(config)
     .prepare(`INSERT INTO current_context
-    (singleton, chatId, eventId, messageId, messageCreateTime, source, kind, textChars, startedAt, sendCount)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    (singleton, chatId, eventId, messageId, messageCreateTime, threadId, source, kind, textChars, startedAt, sendCount)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(singleton) DO UPDATE SET chatId=excluded.chatId, eventId=excluded.eventId,
       messageId=excluded.messageId, messageCreateTime=excluded.messageCreateTime,
-      source=excluded.source, kind=excluded.kind,
+      threadId=excluded.threadId, source=excluded.source, kind=excluded.kind,
       textChars=excluded.textChars, startedAt=excluded.startedAt, sendCount=0,
       lastSentAt=NULL, contextUsage=NULL, contextUsageSource=NULL RETURNING *`)
     .get(
@@ -28,6 +29,7 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
       context.eventId,
       context.messageId ?? null,
       context.messageCreateTime ?? null,
+      context.threadId ?? null,
       context.source,
       context.kind,
       context.textChars,
