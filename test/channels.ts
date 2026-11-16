@@ -25,6 +25,8 @@ import { attachFeishuResources } from '../src/extensions/feishu/attachments.js';
 import type { FeishuApiResponse, FeishuTransport } from '../src/extensions/feishu/client.js';
 import {
   forwardedTranscript,
+  hasChat,
+  MISSING_CHAT_ID,
   messageResources,
   messageText,
   normalizeFeishuInbound,
@@ -263,6 +265,26 @@ const plainThreadless = normalizeFeishuInbound(
   'feishu-ws',
 );
 assert.equal(plainThreadless.threadId, undefined, 'root_id alone is not a topic');
+// An event without a chat id cannot be bound or answered, so it is dropped before
+// delivery instead of inventing a chat named after a sentinel.
+const orphanChat = normalizeFeishuInbound(
+  {
+    header: { event_id: 'evt-orphan' },
+    event: {
+      message: {
+        message_id: 'om_orphan',
+        message_type: 'text',
+        create_time: '1700000000000',
+        content: JSON.stringify({ text: 'no chat' }),
+      },
+    },
+  },
+  'feishu-ws',
+);
+assert.equal(orphanChat.chatId, MISSING_CHAT_ID);
+assert.equal(hasChat(orphanChat), false);
+assert.equal(hasChat(topicEvent), true);
+assert.equal(hasChat(normalizeInbound({ type: 'wake', prompt: 'tick' }, 'test')), true);
 const topicConfig: AppConfig = { ...config, stateDir: path.join(tmp, 'topic-state') };
 writeCurrentContext(topicConfig, topicEvent);
 assert.equal(readCurrentContext(topicConfig).threadId, 'omt_d4be107c616');

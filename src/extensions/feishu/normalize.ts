@@ -5,6 +5,17 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Stands in for a missing `chat_id`. A real chat id starts with `oc_`, so this
+ * value identifies an event the receiver refuses to deliver.
+ */
+export const MISSING_CHAT_ID = 'feishu-chat';
+
+/** A message event is deliverable only when the platform gave it a chat. */
+export function hasChat(event: InboundEvent): boolean {
+  return !event.messageId || event.chatId !== MISSING_CHAT_ID;
+}
+
 interface FeishuMessage {
   message_id?: string;
   message_type?: string;
@@ -51,7 +62,7 @@ export function normalizeFeishuInbound(raw: unknown, source: string): InboundEve
       id: envelope.header?.event_id || message.message_id || newId(),
       source,
       kind: 'message',
-      chatId: message.chat_id || 'feishu-chat',
+      chatId: message.chat_id || MISSING_CHAT_ID,
       userId: sender?.sender_id?.open_id || sender?.sender_id?.user_id,
       messageId: message.message_id,
       createTime: createTime(message),
