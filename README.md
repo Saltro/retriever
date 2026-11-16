@@ -230,6 +230,15 @@ Every event is one JSON line under `<stateDir>/logs/<scope>-YYYY-MM-DD.ndjson`: 
 
 Files older than fourteen days are removed on the first write of a process. The daemon keeps printing a human-readable copy to `daemon.log`, now with a timestamp, so following a turn stays possible without `jq`.
 
+`retriever log` reads them back:
+
+```bash
+retriever log                        # today, newest 40 lines
+retriever log decision --days 3      # what three days of turns did
+retriever log --event-id evt-123     # one turn, every scope
+retriever log --event prompt --json  # untouched records for jq
+```
+
 ## Runtime cron
 
 Cron schedules live only in SQLite and are managed through the CLI:

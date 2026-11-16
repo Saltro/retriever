@@ -274,6 +274,28 @@ assert.equal(JSON.parse(cli(['main-session']).stdout).sessionId, 'personal-agent
 assert.match(cli(['help']).stdout, /^Commands:/m);
 assert.match(cli(['help', 'sessions']).stdout, /retriever sessions history <id>/);
 assert.match(cli(['help', 'sessions', 'send']).stdout, /takes the message as a steering prompt/);
+// Logs read back by scope, event prefix and event id.
+type LogRecord = { scope: string; event: string; event_id?: string };
+const decisionLog = JSON.parse(
+  cli(['log', 'decision', '--json', '--lines', '20']).stdout,
+) as LogRecord[];
+assert.ok(Array.isArray(decisionLog) && decisionLog.length > 0);
+assert.ok(decisionLog.every((record) => record.scope === 'decision'));
+const decisionEvents = new Set(decisionLog.map((record) => record.event));
+assert.ok(decisionEvents.has('turn.end'));
+assert.ok(decisionEvents.has('delegate'));
+const turn = decisionLog.find((record) => record.event === 'turn.end');
+assert.ok(turn?.event_id);
+const turnRecords = JSON.parse(
+  cli(['log', '--event-id', String(turn?.event_id), '--json']).stdout,
+) as LogRecord[];
+assert.ok(turnRecords.length > 0);
+assert.equal(
+  turnRecords.every((record) => record.event_id === turn?.event_id),
+  true,
+);
+assert.match(cli(['log', '--event', 'prompt.']).stdout, /\[daemon\] prompt\./);
+assert.match(cli(['help', 'log']).stdout, /retriever log \[scope\.\.\.\]/);
 assert.match(cli(['help', 'nope']).stdout, /^Unknown command: nope/);
 const longReply = 'x'.repeat(201);
 const rawSend = (args: string[]) =>

@@ -4,6 +4,7 @@ import { runBindCli } from './cli/bind.js';
 import { runCronCli } from './cli/cron.js';
 import { runDaemonCli } from './cli/daemon.js';
 import { renderHelp } from './cli/help.js';
+import { runLogCli } from './cli/log.js';
 import { runMainSessionCli } from './cli/main-session.js';
 import { runReturnCli } from './cli/return.js';
 import { runSendCli } from './cli/send.js';
@@ -33,6 +34,7 @@ async function main(): Promise<void> {
   else if (command === 'sessions') await runSessionsCli(args);
   else if (command === 'main-session') await runMainSessionCli(args);
   else if (command === 'cron') await runCronCli(args);
+  else if (command === 'log') runLogCli(args);
   else if (command === 'daemon') await runDaemonCli(args);
   else if (command === undefined) runForegroundDaemon();
   else {

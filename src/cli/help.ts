@@ -114,6 +114,21 @@ export const COMMANDS: CommandHelp[] = [
     output: 'The cron record as JSON for mutations; a table for `list`.',
   },
   {
+    name: 'log',
+    summary: 'Print recorded events, newest last.',
+    usage: [
+      'retriever log [scope...] [--lines <n>] [--days <n>] [--event <prefix>] [--event-id <id>] [--json]',
+    ],
+    notes: [
+      'Reads <stateDir>/logs/<scope>-YYYY-MM-DD.ndjson. Scopes default to every file; the usual ones are daemon, decision and session-callback.',
+      '--event matches a prefix, so --event prompt shows prompt.start and prompt.done.',
+      '--days covers the previous local days, today included; the default is today only.',
+      '--json prints the records untouched, for jq or a diff.',
+    ],
+    output:
+      'One line per event, or a JSON array with --json. Nothing on stdout for an empty selection.',
+  },
+  {
     name: 'bind',
     summary: 'Inspect or set where `send` delivers.',
     usage: ['retriever bind status', 'retriever bind destination --chat-id <id>'],
