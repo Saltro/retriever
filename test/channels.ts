@@ -494,6 +494,36 @@ await assert.rejects(
 );
 assert.ok(new MockSender({ type: 'mock', mockOutbox: path.join(tmp, 'unused') }));
 
+// A resource call answers HTTP 200 with a JSON envelope when the app lacks the
+// permission; that body must fail instead of becoming the attachment file.
+const realFetch = globalThis.fetch;
+const fetchCalls: string[] = [];
+globalThis.fetch = (async (input: string | URL | Request) => {
+  const url = String(input instanceof Request ? input.url : input);
+  fetchCalls.push(url);
+  if (url.includes('tenant_access_token')) {
+    return new Response(
+      JSON.stringify({ code: 0, tenant_access_token: 'stub-token', expire: 7200 }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
+    );
+  }
+  return new Response(JSON.stringify({ code: 99991672, msg: 'no resource permission' }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}) as typeof fetch;
+try {
+  const { FeishuClient } = await import('../src/extensions/feishu/client.js');
+  const stubbed = new FeishuClient({ appId: 'cli_test', appSecret: 'secret' });
+  await assert.rejects(
+    stubbed.download('/open-apis/im/v1/messages/om_x/resources/img_key?type=image'),
+    /code=99991672/,
+  );
+  assert.equal(fetchCalls.filter((url) => url.includes('/resources/')).length, 1);
+} finally {
+  globalThis.fetch = realFetch;
+}
+
 const stdinConfig: AppConfig = {
   ...config,
   channel: { type: 'stdin' },

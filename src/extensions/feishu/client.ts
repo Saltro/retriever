@@ -82,6 +82,14 @@ export class FeishuClient implements FeishuTransport {
           `Feishu download failed path=${pathAndQuery} http=${response.status} ${detail.slice(0, 200)}`,
         );
       }
+      // A permission error can arrive as HTTP 200 with a JSON envelope; saving it
+      // would hand the agent a path to an error message.
+      if ((response.headers.get('content-type') ?? '').includes('application/json')) {
+        const payload = (await response.json().catch(() => ({}))) as FeishuApiResponse;
+        throw new Error(
+          `Feishu download failed path=${pathAndQuery} code=${payload.code ?? 'unknown'} msg=${payload.msg ?? 'error envelope'}`,
+        );
+      }
       const declared = Number(response.headers.get('content-length'));
       if (maxBytes && Number.isFinite(declared) && declared > maxBytes)
         throw new Error(`too large: declared ${declared} bytes, limit ${maxBytes}`);
