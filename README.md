@@ -141,6 +141,11 @@ Inbound resources are capped at 30 MB; outbound uploads are checked against Feis
 
 A forwarded topic or a merged forward arrives as the fixed string `Merged and Forwarded Message`, so the channel fetches its child messages with the get-message API and renders them as a numbered transcript, sender and all, downloading the images and documents inside. Reading other messages' content needs `im:message:readonly` (or `im:message`) in addition to `im:resource`.
 
+Three identifiers describe a turn, and they are deliberately separate:
+- `messageId` is the **staleness anchor**: the newest message this turn has accounted for. `--rebase` and `--force` move it forward, which is why a reply must never target it.
+- `turnMessageId` is the **message that started the turn**, stored in its own column. It is the anchor a threaded reply hangs off.
+- `threadId` is the **thread identity** (`omt_*` for a Feishu topic). It says the reply belongs inside a thread, while `turnMessageId` says which message inside that thread carries it.
+
 A message that belongs to a Feishu topic thread is answered inside that thread: replies and attachments go through the reply API with `reply_in_thread`, so a topic group keeps one conversation per topic instead of a new topic per answer. Messages in the chat stream keep getting top-level replies. The thread reply is used only while the topic lives in the bound output chat; a topic from another input chat is answered in the bound chat so the visible destination stays fixed. In a topic group the chat-level message list only returns topic roots, so the newer-messages check sees roots only; it may miss an interruption inside a thread, never invent one.
 
 A send holds at most 200 characters unless `--long` is passed, so a default answer arrives as a few chat messages instead of one wall of text. A normal send is a plain chat message rendered from markdown with the context estimate as an italic last line; `--long` keeps the card for code, tables and anything that has to arrive as one message.

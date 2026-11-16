@@ -92,11 +92,23 @@ export interface InboundEvent {
   raw?: unknown;
 }
 
+/**
+ * Where a reply belongs inside a thread. `id` names the thread; `anchorMessageId`
+ * names the message the reply hangs off, because some platforms accept only a
+ * message id and cannot address a thread directly.
+ */
+export interface ReplyThread {
+  /** Platform thread identity, e.g. a Feishu topic id (`omt_*`). */
+  id: string;
+  /** Message inside the thread that carries the reply. */
+  anchorMessageId: string;
+}
+
 export interface OutboundReply {
   chatId: string;
   inReplyTo: string;
-  /** Message whose topic thread the reply belongs in; absent means the chat stream. */
-  threadMessageId?: string;
+  /** Absent means the reply belongs in the chat stream. */
+  thread?: ReplyThread;
   text: string;
   contextFooter?: string;
   /** Long output arrives as a card; a normal reply stays a plain chat message. */
@@ -120,7 +132,7 @@ export interface Sender {
   sendAttachment?(
     chatId: string,
     attachment: Attachment,
-    options?: { threadMessageId?: string },
+    options?: { thread?: ReplyThread },
   ): Promise<unknown>;
   addReaction?(messageId: string, emojiType: string): Promise<unknown>;
   /** Newest messages in the chat, for detecting that a reply is behind the conversation. */
@@ -130,7 +142,12 @@ export interface Sender {
 export interface RuntimeContext {
   chatId: string;
   eventId: string;
+  /**
+   * Staleness anchor: the newest message this turn is known to have accounted
+   * for. `--rebase`/`--force` move it forward, so it is not the reply target.
+   */
   messageId?: string;
+  /** Creation time of `messageId`, in epoch milliseconds. */
   messageCreateTime?: number;
   /**
    * The message that started this turn, kept apart from the staleness anchor so a

@@ -7,13 +7,13 @@ import {
   RECENT_MESSAGE_WINDOW,
   unreadMessages,
 } from '../core/channels/staleness.js';
-import { readFeishuChatBinding as readOutputBinding } from '../core/state/binding.js';
+import { readVisibleBinding as readOutputBinding } from '../core/state/binding.js';
 import {
   advanceContextAnchor,
   readCurrentContext,
   recordContextSend,
 } from '../core/state/context.js';
-import type { Attachment, RecentMessage, RuntimeContext } from '../types.js';
+import type { Attachment, RecentMessage, ReplyThread, RuntimeContext } from '../types.js';
 
 /** Long enough for a chat-style reply, short enough to keep the conversation readable. */
 export const CHAT_REPLY_LIMIT = 200;
@@ -90,14 +90,14 @@ export async function runSendCli(args: string[], command = 'retriever send'): Pr
   const context = tryReadCurrentContext(config);
   if (context)
     await guardConversation(config, channel, chatId, context, { rebase, force }, command);
-  const threadMessageId = replyTarget(context, chatId);
+  const thread = replyThread(context, chatId);
   if (text || !attachments.length)
-    await sendText(config, channel, chatId, context, text, long, threadMessageId, command);
+    await sendText(config, channel, chatId, context, text, long, thread, command);
   for (const attachment of attachments) {
     const sendAttachment = channel.sender.sendAttachment;
     if (!sendAttachment)
       throw new Error(`Channel ${channel.type} cannot send ${attachment.kind} messages.`);
-    await sendAttachment.call(channel.sender, chatId, attachment, { threadMessageId });
+    await sendAttachment.call(channel.sender, chatId, attachment, { thread });
     console.error(
       `[${command}] sent ${attachment.kind} chat=${chatId} path=${attachment.path} name=${attachment.name || path.basename(attachment.path)}`,
     );
@@ -113,13 +113,13 @@ async function sendText(
   context: RuntimeContext | undefined,
   text: string,
   long: boolean,
-  threadMessageId: string | undefined,
+  thread: ReplyThread | undefined,
   command: string,
 ): Promise<void> {
   await channel.sender.send({
     chatId,
     inReplyTo: context?.eventId || 'manual',
-    threadMessageId,
+    thread,
     text,
     contextFooter: context?.contextUsage,
     long,
@@ -202,13 +202,13 @@ async function guardConversation(
 }
 
 /**
- * A topic reply hangs off the message that started the turn — not the staleness
+ * A threaded reply hangs off the message that started the turn — not the staleness
  * anchor, which moves forward — and only when that thread lives in the bound chat:
- * a topic from another input chat must not pull the visible destination with it.
+ * a thread from another input chat must not pull the visible destination with it.
  */
-function replyTarget(context: RuntimeContext | undefined, chatId: string): string | undefined {
+function replyThread(context: RuntimeContext | undefined, chatId: string): ReplyThread | undefined {
   if (!context?.threadId || !context.turnMessageId || context.chatId !== chatId) return undefined;
-  return context.turnMessageId;
+  return { id: context.threadId, anchorMessageId: context.turnMessageId };
 }
 
 function tryReadCurrentContext(config: ReturnType<typeof loadConfig>) {

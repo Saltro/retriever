@@ -6,6 +6,7 @@ import type {
   FeishuExtensionConfig,
   OutboundReply,
   RecentMessage,
+  ReplyThread,
   Sender,
   SenderConfig,
 } from '../../types.js';
@@ -39,19 +40,19 @@ export class MockSender implements Sender {
   async sendAttachment(
     chatId: string,
     attachment: Attachment,
-    options: { threadMessageId?: string } = {},
+    options: { thread?: ReplyThread } = {},
   ): Promise<{ ok: true; mock: true }> {
     const record = {
       chatId,
       msgType: attachment.kind,
       attachment,
-      threadMessageId: options.threadMessageId,
+      thread: options.thread,
       sentAt: new Date().toISOString(),
       transport: 'mock-attachment',
     };
     fs.appendFileSync(this.outbox, `${JSON.stringify(record)}\n`);
     console.error(
-      `[mock-send] chat=${chatId} msgType=${attachment.kind} path=${attachment.path} name=${attachment.name || ''} thread=${options.threadMessageId || ''}`,
+      `[mock-send] chat=${chatId} msgType=${attachment.kind} path=${attachment.path} name=${attachment.name || ''} thread=${options.thread?.id || ''}`,
     );
     return { ok: true, mock: true };
   }
@@ -110,7 +111,7 @@ export class FeishuSender implements Sender {
     return this.sendMessage(
       reply.long ? 'interactive' : 'post',
       reply.long ? buildReplyCard(reply) : buildReplyPost(reply),
-      { chatId: reply.chatId, threadMessageId: reply.threadMessageId },
+      { chatId: reply.chatId, thread: reply.thread },
     );
   }
 
@@ -118,7 +119,7 @@ export class FeishuSender implements Sender {
   async sendAttachment(
     chatId: string,
     attachment: Attachment,
-    options: { threadMessageId?: string } = {},
+    options: { thread?: ReplyThread } = {},
   ): Promise<FeishuApiResponse> {
     const name = attachment.name || path.basename(attachment.path);
     const limit = attachment.kind === 'image' ? MAX_IMAGE_BYTES : MAX_FILE_BYTES;
@@ -130,7 +131,7 @@ export class FeishuSender implements Sender {
     const data = fs.readFileSync(attachment.path);
     if (attachment.kind === 'file' && !path.extname(name))
       throw new Error(`${name} has no file extension; Feishu requires one`);
-    const target = { chatId, threadMessageId: options.threadMessageId };
+    const target = { chatId, thread: options.thread };
     if (attachment.kind === 'image') {
       const form = new FormData();
       form.append('image_type', 'message');
@@ -194,13 +195,14 @@ export class FeishuSender implements Sender {
   private async sendMessage(
     msgType: string,
     content: Record<string, unknown>,
-    target: { chatId: string; threadMessageId?: string },
+    target: { chatId: string; thread?: ReplyThread },
   ): Promise<FeishuApiResponse> {
     // A topic group takes a top-level send as a new topic, so an answer to a topic
-    // message has to arrive as a reply inside that thread.
-    if (target.threadMessageId)
+    // message has to arrive as a reply inside that thread. Feishu addresses the
+    // thread through a message id, which `anchorMessageId` carries.
+    if (target.thread)
       return this.client.request(
-        `/open-apis/im/v1/messages/${encodeURIComponent(target.threadMessageId)}/reply`,
+        `/open-apis/im/v1/messages/${encodeURIComponent(target.thread.anchorMessageId)}/reply`,
         { json: { msg_type: msgType, content: JSON.stringify(content), reply_in_thread: true } },
       );
     return this.client.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {

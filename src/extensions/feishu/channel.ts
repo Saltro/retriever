@@ -1,5 +1,5 @@
 import type { ChannelAdapter } from '../../core/channels/registry.js';
-import { ensureFeishuChatBinding, readFeishuChatBinding } from '../../core/state/binding.js';
+import { ensureVisibleBinding, readVisibleBinding } from '../../core/state/binding.js';
 import type { AppConfig, InboundEvent, Sender } from '../../types.js';
 import { attachFeishuResources, pruneAttachments } from './attachments.js';
 import { FeishuClient } from './client.js';
@@ -44,8 +44,8 @@ export class FeishuChannel implements ChannelAdapter {
       !event.source.includes('feishu')
     )
       return;
-    if (readFeishuChatBinding(this.config)) return;
-    ensureFeishuChatBinding(this.config, event.chatId, 'auto');
+    if (readVisibleBinding(this.config)) return;
+    ensureVisibleBinding(this.config, event.chatId, 'auto');
     console.error(`[channel] feishu chat bound chat=${event.chatId}`);
   }
 

@@ -18,7 +18,7 @@ import {
   noticeToInbound,
   writeParentReturnNotification,
 } from '../src/core/sessions/callbacks.js';
-import { readFeishuChatBinding } from '../src/core/state/binding.js';
+import { readVisibleBinding } from '../src/core/state/binding.js';
 import { readCurrentContext, writeCurrentContext } from '../src/core/state/context.js';
 import { getStateDb } from '../src/core/state/db.js';
 import { attachFeishuResources } from '../src/extensions/feishu/attachments.js';
@@ -463,7 +463,7 @@ uploadCalls.length = 0;
 await feishuSender.sendAttachment(
   'oc_direct',
   { kind: 'image', path: imagePath },
-  { threadMessageId: 'om_direct' },
+  { thread: { id: 'omt_test', anchorMessageId: 'om_direct' } },
 );
 assert.deepEqual(uploadCalls[1], {
   kind: 'request',
@@ -536,7 +536,7 @@ await stdinDaemon.enqueue(
     'stdin',
   ),
 );
-assert.equal(readFeishuChatBinding(stdinConfig)?.chatId, 'terminal-destination');
+assert.equal(readVisibleBinding(stdinConfig)?.chatId, 'terminal-destination');
 assert.equal(readCurrentContext(stdinConfig).textChars, 'stdin ingress'.length);
 stdinDaemon.stop();
 const file = path.join(tmp, 'config.json');

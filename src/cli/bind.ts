@@ -1,9 +1,6 @@
 import { loadConfig } from '../config.js';
-import {
-  bindingPath,
-  readFeishuChatBinding,
-  writeFeishuChatBinding,
-} from '../core/state/binding.js';
+import { readVisibleBinding, writeVisibleBinding } from '../core/state/binding.js';
+import { stateDbPath } from '../core/state/paths.js';
 
 function usage(): never {
   console.error(`Usage:
@@ -30,14 +27,14 @@ export async function runBindCli(args: string[]): Promise<void> {
       else usage();
     }
     if (!chatId) usage();
-    const binding = writeFeishuChatBinding(config, chatId, 'manual');
-    console.log(JSON.stringify({ ...binding, path: bindingPath(config) }, null, 2));
+    const binding = writeVisibleBinding(config, chatId, 'manual');
+    console.log(JSON.stringify({ ...binding, stateDb: stateDbPath(config) }, null, 2));
     return;
   }
   if (command === 'status') {
-    const binding = readFeishuChatBinding(config);
+    const binding = readVisibleBinding(config);
     console.log(
-      JSON.stringify({ bound: Boolean(binding), binding, path: bindingPath(config) }, null, 2),
+      JSON.stringify({ bound: Boolean(binding), binding, stateDb: stateDbPath(config) }, null, 2),
     );
     return;
   }

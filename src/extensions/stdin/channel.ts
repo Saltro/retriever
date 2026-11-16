@@ -1,7 +1,7 @@
 import readline, { type Interface } from 'node:readline';
 import type { ChannelAdapter } from '../../core/channels/registry.js';
 import { normalizeInbound } from '../../core/events.js';
-import { ensureFeishuChatBinding, readFeishuChatBinding } from '../../core/state/binding.js';
+import { ensureVisibleBinding, readVisibleBinding } from '../../core/state/binding.js';
 import type { AppConfig, InboundEvent, OutboundReply, Sender } from '../../types.js';
 
 class StdoutSender implements Sender {
@@ -50,8 +50,8 @@ export class StdinChannel implements ChannelAdapter {
   }
 
   bindInbound(event: InboundEvent): void {
-    if (event.kind === 'message' && !readFeishuChatBinding(this.config)) {
-      ensureFeishuChatBinding(this.config, event.chatId || 'stdin', 'auto');
+    if (event.kind === 'message' && !readVisibleBinding(this.config)) {
+      ensureVisibleBinding(this.config, event.chatId || 'stdin', 'auto');
     }
   }
 
