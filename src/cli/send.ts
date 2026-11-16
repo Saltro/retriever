@@ -9,7 +9,7 @@ import {
 } from '../core/channels/staleness.js';
 import { readVisibleBinding as readOutputBinding } from '../core/state/binding.js';
 import {
-  advanceContextAnchor,
+  advanceStalenessAnchor,
   readCurrentContext,
   recordContextSend,
 } from '../core/state/context.js';
@@ -175,7 +175,7 @@ async function guardConversation(
   if (flags.rebase || flags.force) {
     const newest = newestUnreadAnchor(unread);
     if (newest)
-      advanceContextAnchor(config, {
+      advanceStalenessAnchor(config, {
         messageId: newest.messageId,
         messageCreateTime: newest.createTime,
       });

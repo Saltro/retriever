@@ -52,7 +52,7 @@ export function readCurrentContext(config: AppConfig): CurrentContext {
  * Moves only the staleness anchor forward; event identity, the turn's own message
  * and counters stay put, so the rest of a split reply still targets the right thread.
  */
-export function advanceContextAnchor(
+export function advanceStalenessAnchor(
   config: AppConfig,
   reference: { messageId: string; messageCreateTime: number },
 ): CurrentContext {
