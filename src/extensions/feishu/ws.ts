@@ -1,6 +1,6 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import type { AppConfig, InboundEvent } from '../../types.js';
-import { normalizeFeishuInbound } from './normalize.js';
+import { hasChat, normalizeFeishuInbound } from './normalize.js';
 
 interface StoppableWsClient {
   close(params?: { force?: boolean }): void;
@@ -20,6 +20,13 @@ export async function startFeishuWsReceiver(
   const dispatcher = new Lark.EventDispatcher({}).register({
     'im.message.receive_v1': (data: unknown) => {
       const event = normalizeFeishuInbound(data, 'feishu-ws');
+      // A reply would have nowhere to go and auto-binding would invent a chat.
+      if (!hasChat(event)) {
+        console.error(
+          `[feishu-ws] dropped message without chat_id message=${event.messageId} event=${event.id}`,
+        );
+        return;
+      }
       setImmediate(() => {
         onEvent(event).catch((error) => console.error(`[feishu-ws] ${error.stack || error}`));
       });

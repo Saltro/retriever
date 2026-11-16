@@ -1,20 +1,15 @@
-import path from 'node:path';
 import type { AppConfig } from '../../types.js';
 import { getStateDb } from './db.js';
-import { stateDir } from './paths.js';
 
-export interface FeishuChatBinding {
+/** The one chat a person actually sees; inputs may come from anywhere. */
+export interface VisibleBinding {
   chatId: string;
   createdAt: string;
   updatedAt: string;
   source?: string;
 }
 
-export function bindingPath(config: AppConfig): string {
-  return path.join(stateDir(config), 'feishu-chat-binding.json');
-}
-
-function bindingFromRow(row: Record<string, unknown>): FeishuChatBinding {
+function bindingFromRow(row: Record<string, unknown>): VisibleBinding {
   return {
     chatId: String(row.chatId),
     createdAt: String(row.createdAt),
@@ -23,16 +18,16 @@ function bindingFromRow(row: Record<string, unknown>): FeishuChatBinding {
   };
 }
 
-export function readFeishuChatBinding(config: AppConfig): FeishuChatBinding | undefined {
+export function readVisibleBinding(config: AppConfig): VisibleBinding | undefined {
   const row = getStateDb(config).prepare('SELECT * FROM visible_binding WHERE singleton = 1').get();
   return row ? bindingFromRow(row) : undefined;
 }
 
-export function writeFeishuChatBinding(
+export function writeVisibleBinding(
   config: AppConfig,
   chatId: string,
   source = 'manual',
-): FeishuChatBinding {
+): VisibleBinding {
   if (!chatId.trim()) throw new Error('visible chat binding requires a nonempty chat id');
   const now = new Date().toISOString();
   const row = getStateDb(config)
@@ -44,18 +39,18 @@ export function writeFeishuChatBinding(
   return bindingFromRow(row);
 }
 
-export function ensureFeishuChatBinding(
+export function ensureVisibleBinding(
   config: AppConfig,
   chatId: string,
   source = 'auto',
-): FeishuChatBinding {
+): VisibleBinding {
   if (!chatId.trim()) throw new Error('visible chat binding requires a nonempty chat id');
   const now = new Date().toISOString();
   const db = getStateDb(config);
   db.prepare(
     'INSERT OR IGNORE INTO visible_binding(singleton, chatId, createdAt, updatedAt, source) VALUES (1, ?, ?, ?, ?)',
   ).run(chatId, now, now, source);
-  const binding = readFeishuChatBinding(config);
+  const binding = readVisibleBinding(config);
   if (!binding) throw new Error('visible chat binding missing after upsert');
   return binding;
 }

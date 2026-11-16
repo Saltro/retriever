@@ -6,7 +6,7 @@ import type { RuntimeCronRecord } from '../cron/registry.js';
 import { normalizeRuntimeCron } from '../cron/registry.js';
 import { stateDbPath, stateDir } from './paths.js';
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 6;
 const connections = new Map<string, DatabaseSync>();
 type FieldKind = 'text' | 'number' | 'boolean' | 'json';
 export type StateFields = Record<string, FieldKind>;
@@ -70,6 +70,8 @@ export const contextFields: StateFields = {
   eventId: 'text',
   messageId: 'text',
   messageCreateTime: 'number',
+  turnMessageId: 'text',
+  threadId: 'text',
   source: 'text',
   kind: 'text',
   textChars: 'number',
@@ -143,6 +145,14 @@ export function getStateDb(config: AppConfig): DatabaseSync {
       if (version < 4) {
         db.exec(
           'ALTER TABLE current_context ADD COLUMN messageCreateTime INTEGER; PRAGMA user_version = 4;',
+        );
+      }
+      if (version < 5) {
+        db.exec('ALTER TABLE current_context ADD COLUMN threadId TEXT; PRAGMA user_version = 5;');
+      }
+      if (version < 6) {
+        db.exec(
+          'ALTER TABLE current_context ADD COLUMN turnMessageId TEXT; PRAGMA user_version = 6;',
         );
       }
       if (!db.prepare('SELECT value FROM state_meta WHERE key = ?').get('legacy-json-v1')) {

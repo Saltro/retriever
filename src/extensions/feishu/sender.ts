@@ -2,26 +2,16 @@ import fs from 'node:fs';
 import path from 'node:path';
 import type {
   AppConfig,
+  Attachment,
   FeishuExtensionConfig,
   OutboundReply,
   RecentMessage,
+  ReplyThread,
   Sender,
   SenderConfig,
 } from '../../types.js';
+import { type FeishuApiResponse, FeishuClient, type FeishuTransport } from './client.js';
 import { createTime, messageText } from './normalize.js';
-
-interface TenantTokenResponse {
-  code?: number;
-  msg?: string;
-  tenant_access_token?: string;
-  expire?: number;
-}
-
-interface FeishuApiResponse {
-  code?: number;
-  msg?: string;
-  data?: unknown;
-}
 
 export class MockSender implements Sender {
   private outbox: string;
@@ -43,6 +33,26 @@ export class MockSender implements Sender {
     fs.appendFileSync(this.outbox, `${JSON.stringify(record)}\n`);
     console.error(
       `[mock-send] chat=${reply.chatId} msgType=${record.msgType} markdown=${JSON.stringify(reply.text)} footer=${JSON.stringify(reply.contextFooter || '')}`,
+    );
+    return { ok: true, mock: true };
+  }
+
+  async sendAttachment(
+    chatId: string,
+    attachment: Attachment,
+    options: { thread?: ReplyThread } = {},
+  ): Promise<{ ok: true; mock: true }> {
+    const record = {
+      chatId,
+      msgType: attachment.kind,
+      attachment,
+      thread: options.thread,
+      sentAt: new Date().toISOString(),
+      transport: 'mock-attachment',
+    };
+    fs.appendFileSync(this.outbox, `${JSON.stringify(record)}\n`);
+    console.error(
+      `[mock-send] chat=${chatId} msgType=${attachment.kind} path=${attachment.path} name=${attachment.name || ''} thread=${options.thread?.id || ''}`,
     );
     return { ok: true, mock: true };
   }
@@ -83,42 +93,86 @@ interface FeishuListedMessage {
 /** A hung connection must not hold up a reply; the caller falls back to sending. */
 const LIST_TIMEOUT_MS = 3000;
 
-export class FeishuSender implements Sender {
-  private token: string | null = null;
-  private tokenExpiresAt = 0;
+/** Feishu caps an image message at 10 MB and a file message at 30 MB. */
+const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const MAX_FILE_BYTES = 30 * 1024 * 1024;
 
-  constructor(private config: FeishuExtensionConfig) {}
+export class FeishuSender implements Sender {
+  private client: FeishuTransport;
+
+  constructor(
+    private config: FeishuExtensionConfig,
+    client: FeishuTransport = new FeishuClient(config),
+  ) {
+    this.client = client;
+  }
 
   async send(reply: OutboundReply): Promise<FeishuApiResponse> {
-    return this.withTokenRetry(() => this.sendWithToken(reply));
+    return this.sendMessage(
+      reply.long ? 'interactive' : 'post',
+      reply.long ? buildReplyCard(reply) : buildReplyPost(reply),
+      { chatId: reply.chatId, thread: reply.thread },
+    );
+  }
+
+  /** Feishu carries one resource per message, so each attachment is its own send. */
+  async sendAttachment(
+    chatId: string,
+    attachment: Attachment,
+    options: { thread?: ReplyThread } = {},
+  ): Promise<FeishuApiResponse> {
+    const name = attachment.name || path.basename(attachment.path);
+    const limit = attachment.kind === 'image' ? MAX_IMAGE_BYTES : MAX_FILE_BYTES;
+    const size = fs.statSync(attachment.path).size;
+    if (size > limit)
+      throw new Error(
+        `${name} is ${size} bytes; Feishu accepts at most ${limit} for a${attachment.kind === 'image' ? 'n image' : ' file'} message`,
+      );
+    const data = fs.readFileSync(attachment.path);
+    if (attachment.kind === 'file' && !path.extname(name))
+      throw new Error(`${name} has no file extension; Feishu requires one`);
+    const target = { chatId, thread: options.thread };
+    if (attachment.kind === 'image') {
+      const form = new FormData();
+      form.append('image_type', 'message');
+      form.append('image', fileBlob(data), name);
+      const uploaded = await this.client.upload('/open-apis/im/v1/images', form);
+      return this.sendMessage(
+        'image',
+        { image_key: (uploaded.data as { image_key?: string } | undefined)?.image_key },
+        target,
+      );
+    }
+    const form = new FormData();
+    form.append('file_type', 'stream');
+    form.append('file_name', name);
+    form.append('file', fileBlob(data), name);
+    const uploaded = await this.client.upload('/open-apis/im/v1/files', form);
+    return this.sendMessage(
+      'file',
+      { file_key: (uploaded.data as { file_key?: string } | undefined)?.file_key },
+      target,
+    );
   }
 
   async addReaction(messageId: string, emojiType: string): Promise<FeishuApiResponse> {
-    return this.withTokenRetry(() => this.addReactionWithToken(messageId, emojiType));
+    return this.client.request(
+      `/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`,
+      { json: { reaction_type: { emoji_type: emojiType } } },
+    );
   }
 
   async recentMessages(chatId: string, limit: number): Promise<RecentMessage[]> {
-    return this.withTokenRetry(() => this.recentMessagesWithToken(chatId, limit));
-  }
-
-  private async recentMessagesWithToken(chatId: string, limit: number): Promise<RecentMessage[]> {
-    const token = await this.getTenantAccessToken();
     const query = new URLSearchParams({
       container_id_type: 'chat',
       container_id: chatId,
       sort_type: 'ByCreateTimeDesc',
       page_size: String(Math.min(Math.max(limit, 1), 50)),
     });
-    const response = await fetch(`${this.baseUrl()}/open-apis/im/v1/messages?${query}`, {
-      headers: { authorization: `Bearer ${token}` },
-      signal: AbortSignal.timeout(LIST_TIMEOUT_MS),
-    });
-    const body = (await response.json().catch(() => ({}))) as FeishuApiResponse;
-    if (!response.ok || body.code) {
-      throw new Error(
-        `Feishu message list failed http=${response.status} code=${body.code ?? 'unknown'} msg=${body.msg ?? response.statusText}`,
-      );
-    }
+    const body = await this.client.request<FeishuApiResponse>(
+      `/open-apis/im/v1/messages?${query}`,
+      { timeoutMs: LIST_TIMEOUT_MS },
+    );
     const items = (body.data as { items?: FeishuListedMessage[] } | undefined)?.items || [];
     return items.flatMap((item) => {
       const create = createTime(item);
@@ -138,104 +192,27 @@ export class FeishuSender implements Sender {
     });
   }
 
-  private async sendWithToken(reply: OutboundReply): Promise<FeishuApiResponse> {
-    const token = await this.getTenantAccessToken();
-    const response = await fetch(
-      `${this.baseUrl()}/open-apis/im/v1/messages?receive_id_type=chat_id`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${token}`,
-          'content-type': 'application/json; charset=utf-8',
-        },
-        body: JSON.stringify({
-          receive_id: reply.chatId,
-          msg_type: reply.long ? 'interactive' : 'post',
-          content: JSON.stringify(reply.long ? buildReplyCard(reply) : buildReplyPost(reply)),
-        }),
-      },
-    );
-    const body = (await response.json().catch(() => ({}))) as FeishuApiResponse;
-    if (!response.ok || body.code) {
-      throw new Error(
-        `Feishu send failed http=${response.status} code=${body.code ?? 'unknown'} msg=${body.msg ?? response.statusText}`,
-      );
-    }
-    return body;
-  }
-
-  private async addReactionWithToken(
-    messageId: string,
-    emojiType: string,
+  private async sendMessage(
+    msgType: string,
+    content: Record<string, unknown>,
+    target: { chatId: string; thread?: ReplyThread },
   ): Promise<FeishuApiResponse> {
-    const token = await this.getTenantAccessToken();
-    const response = await fetch(
-      `${this.baseUrl()}/open-apis/im/v1/messages/${encodeURIComponent(messageId)}/reactions`,
-      {
-        method: 'POST',
-        headers: {
-          authorization: `Bearer ${token}`,
-          'content-type': 'application/json; charset=utf-8',
-        },
-        body: JSON.stringify({
-          reaction_type: { emoji_type: emojiType },
-        }),
-      },
-    );
-    const body = (await response.json().catch(() => ({}))) as FeishuApiResponse;
-    if (!response.ok || body.code) {
-      throw new Error(
-        `Feishu reaction failed http=${response.status} code=${body.code ?? 'unknown'} msg=${body.msg ?? response.statusText}`,
+    // A topic group takes a top-level send as a new topic, so an answer to a topic
+    // message has to arrive as a reply inside that thread. Feishu addresses the
+    // thread through a message id, which `anchorMessageId` carries.
+    if (target.thread)
+      return this.client.request(
+        `/open-apis/im/v1/messages/${encodeURIComponent(target.thread.anchorMessageId)}/reply`,
+        { json: { msg_type: msgType, content: JSON.stringify(content), reply_in_thread: true } },
       );
-    }
-    return body;
-  }
-
-  private async withTokenRetry<T>(fn: () => Promise<T>): Promise<T> {
-    try {
-      return await fn();
-    } catch (error) {
-      if (isTokenError(error)) {
-        this.token = null;
-        this.tokenExpiresAt = 0;
-        return fn();
-      }
-      throw error;
-    }
-  }
-
-  private async getTenantAccessToken(): Promise<string> {
-    if (this.token && Date.now() < this.tokenExpiresAt - 60_000) return this.token;
-    if (!this.config.appId || !this.config.appSecret) {
-      throw new Error('Feishu sender requires FEISHU_APP_ID and FEISHU_APP_SECRET.');
-    }
-    const response = await fetch(
-      `${this.baseUrl()}/open-apis/auth/v3/tenant_access_token/internal`,
-      {
-        method: 'POST',
-        headers: { 'content-type': 'application/json; charset=utf-8' },
-        body: JSON.stringify({ app_id: this.config.appId, app_secret: this.config.appSecret }),
-      },
-    );
-    const body = (await response.json().catch(() => ({}))) as TenantTokenResponse;
-    if (!response.ok || body.code || !body.tenant_access_token) {
-      throw new Error(
-        `Feishu token failed http=${response.status} code=${body.code ?? 'unknown'} msg=${body.msg ?? response.statusText}`,
-      );
-    }
-    this.token = body.tenant_access_token;
-    this.tokenExpiresAt = Date.now() + Math.max(1, body.expire ?? 7200) * 1000;
-    return this.token;
-  }
-
-  private baseUrl(): string {
-    return 'https://open.feishu.cn';
+    return this.client.request('/open-apis/im/v1/messages?receive_id_type=chat_id', {
+      json: { receive_id: target.chatId, msg_type: msgType, content: JSON.stringify(content) },
+    });
   }
 }
 
-function isTokenError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return /token|99991663|99991664|99991665|99991668/i.test(message);
+function fileBlob(data: Buffer): Blob {
+  return new Blob([new Uint8Array(data)]);
 }
 
 /**
@@ -269,7 +246,7 @@ function buildReplyCard(reply: OutboundReply): Record<string, unknown> {
   };
 }
 
-export function createSender(config: AppConfig): Sender {
+export function createSender(config: AppConfig, client?: FeishuTransport): Sender {
   if (config.sender?.type === 'mock') return new MockSender(config.sender);
-  return new FeishuSender(config.extensions.feishu);
+  return new FeishuSender(config.extensions.feishu, client);
 }

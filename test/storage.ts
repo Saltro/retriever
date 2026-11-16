@@ -49,9 +49,9 @@ import {
   updateSessionRun,
 } from '../src/core/sessions/registry.js';
 import {
-  ensureFeishuChatBinding,
-  readFeishuChatBinding,
-  writeFeishuChatBinding,
+  ensureVisibleBinding,
+  readVisibleBinding,
+  writeVisibleBinding,
 } from '../src/core/state/binding.js';
 import {
   readCurrentContext,
@@ -102,7 +102,7 @@ if (worker) {
     assert.equal(imported.autoReturn, true);
     assert.equal(imported.logPath, path.join(stateDir(config), 'sessions', 'legacy-child.log'));
     assert.equal(getCron(config, 'legacy-cron').prompt, 'wake');
-    assert.equal(readFeishuChatBinding(config)?.chatId, 'visible-fixed');
+    assert.equal(readVisibleBinding(config)?.chatId, 'visible-fixed');
     assert.equal(listParentNotifications(config)[0].id, 'legacy-notice');
     const notice = claimParentNotifications(config)[0];
     acknowledgeParentNotification(config, notice.id);
@@ -194,14 +194,16 @@ if (worker) {
     );
     assert.equal('callback' in getSession(legacy, 'legacy-child'), false);
     assert.equal(getCron(legacy, 'legacy-cron').prompt, 'wake');
-    assert.equal(readFeishuChatBinding(legacy)?.chatId, 'visible-fixed');
+    assert.equal(readVisibleBinding(legacy)?.chatId, 'visible-fixed');
     assert.deepEqual(listParentNotifications(legacy), [legacyNotice]);
-    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 4);
+    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 6);
     const contextColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(current_context)')
       .all()
       .map((column) => column.name);
     assert.ok(contextColumns.includes('messageCreateTime'));
+    assert.ok(contextColumns.includes('threadId'));
+    assert.ok(contextColumns.includes('turnMessageId'));
     const freshColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(sessions)')
       .all()
@@ -325,8 +327,8 @@ if (worker) {
       const migratedDb = getStateDb(migration);
       assert.equal(
         migratedDb.prepare('PRAGMA user_version').get()?.user_version,
-        4,
-        `v${version} migrates to v4`,
+        6,
+        `v${version} migrates to v6`,
       );
       const migratedColumns = migratedDb
         .prepare('PRAGMA table_info(sessions)')
@@ -385,8 +387,8 @@ if (worker) {
       closeStateDb(migration);
       assert.equal(
         getStateDb(migration).prepare('PRAGMA user_version').get()?.user_version,
-        4,
-        'v4 schema reopens without repeated ALTER',
+        6,
+        'v6 schema reopens without repeated ALTER',
       );
       for (const value of [0, 1])
         assert.equal(getSession(migration, migratedIds[value]).autoReturn, Boolean(value));
@@ -618,15 +620,15 @@ if (worker) {
     if (agentProcessDetached) await testOrphanedGroup(sessions);
 
     const binding = configFor('binding');
-    assert.equal(ensureFeishuChatBinding(binding, 'first-chat').chatId, 'first-chat');
-    const createdAt = readFeishuChatBinding(binding)!.createdAt;
+    assert.equal(ensureVisibleBinding(binding, 'first-chat').chatId, 'first-chat');
+    const createdAt = readVisibleBinding(binding)!.createdAt;
     assert.equal(
-      ensureFeishuChatBinding(binding, 'other-input-chat').chatId,
+      ensureVisibleBinding(binding, 'other-input-chat').chatId,
       'first-chat',
       'single visible binding remains fixed',
     );
-    assert.equal(writeFeishuChatBinding(binding, 'manual-change').createdAt, createdAt);
-    assert.equal(readFeishuChatBinding(binding)?.chatId, 'manual-change');
+    assert.equal(writeVisibleBinding(binding, 'manual-change').createdAt, createdAt);
+    assert.equal(readVisibleBinding(binding)?.chatId, 'manual-change');
 
     const limitedCallback = configFor('limited-callbacks');
     const limitedParent = {

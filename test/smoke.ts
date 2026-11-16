@@ -12,7 +12,7 @@ import { PersonalDaemon } from '../src/core/daemon/daemon.js';
 import { normalizeInbound } from '../src/core/events.js';
 import { listParentNotifications } from '../src/core/sessions/callbacks.js';
 import { loadRegistry } from '../src/core/sessions/registry.js';
-import { readFeishuChatBinding } from '../src/core/state/binding.js';
+import { readVisibleBinding } from '../src/core/state/binding.js';
 import { readCurrentContext, writeCurrentContext } from '../src/core/state/context.js';
 import { normalizeFeishuInbound } from '../src/extensions/feishu/normalize.js';
 import { extractContextUsage, PiRpcRunner } from '../src/extensions/pi/runner.js';
@@ -109,7 +109,7 @@ assert.equal(context.chatId, 'oc-test');
 assert.equal(context.eventId, 'evt-v2');
 assert.equal(context.sendCount, 0);
 assert.equal(context.contextUsage, 'Context usage unavailable');
-assert.equal(readFeishuChatBinding(config)?.chatId, 'oc-test');
+assert.equal(readVisibleBinding(config)?.chatId, 'oc-test');
 assert.equal(fs.existsSync(path.join(config.stateDir!, 'state.sqlite')), true);
 assert.equal(fs.existsSync(path.join(config.stateDir!, 'feishu-chat-binding.json')), false);
 
@@ -164,7 +164,12 @@ for (const messageId of ['om-active-2', 'om-active-3']) {
     reactions.some((record) => record.messageId === messageId && record.emojiType === 'DONE'),
   );
 }
-assert.equal(JSON.parse(cli(['bind', 'status']).stdout).binding.chatId, 'oc-test');
+const bindStatus = JSON.parse(cli(['bind', 'status']).stdout);
+assert.equal(bindStatus.binding.chatId, 'oc-test');
+// The binding lives in SQLite now; pointing at a JSON file that is never written
+// made `bind` lie about where the value comes from.
+assert.equal(bindStatus.path, undefined);
+assert.match(bindStatus.stateDb, /state\.sqlite$/);
 
 await daemon.enqueue({
   id: 'return-callback-smoke',
@@ -174,7 +179,7 @@ await daemon.enqueue({
   text: 'Child session completed.',
 });
 assert.equal(readCurrentContext(config).eventId, 'return-callback-smoke');
-assert.equal(readFeishuChatBinding(config)?.chatId, 'oc-test');
+assert.equal(readVisibleBinding(config)?.chatId, 'oc-test');
 cli(
   ['send', '--stdin'],
   configPath,
@@ -286,6 +291,30 @@ assert.equal(oversize.status, 2);
 assert.match(oversize.stderr, /exceeds the 200-character chat limit/);
 assert.match(oversize.stderr, /--long/);
 assert.equal(rawSend(['send', '--long', longReply]).status, 0);
+// Attachments travel as their own message: a path is uploaded, not inlined in the text.
+const imagePath = path.join(tmp, 'figure.png');
+fs.writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+const documentPath = path.join(tmp, 'notes.txt');
+fs.writeFileSync(documentPath, 'notes');
+assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
+const imageRecord = jsonl(outbox).at(-1);
+assert.equal(imageRecord.transport, 'mock-attachment');
+assert.equal(imageRecord.msgType, 'image');
+assert.equal(imageRecord.attachment.path, imagePath);
+assert.equal(rawSend(['send', '--file', documentPath, 'here it is']).status, 0);
+const captionRecords = jsonl(outbox).slice(-2);
+assert.equal(captionRecords[0].text, 'here it is');
+assert.equal(captionRecords[1].msgType, 'file');
+const missingImage = rawSend(['send', '--image', path.join(tmp, 'missing.png')]);
+assert.equal(missingImage.status, 2);
+assert.match(missingImage.stderr, /not a readable file/);
+// A flag where a path should be is a usage error, not a file that happens to exist.
+assert.equal(rawSend(['send', '--image', '--long']).status, 2);
+assert.equal(rawSend(['send', '--image', imagePath, '--stdin', 'text']).status, 2);
+// A turn answered with an attachment alone still counts as answered.
+const beforeAttachments = readCurrentContext(config).sendCount;
+assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
+assert.equal(readCurrentContext(config).sendCount, beforeAttachments + 1);
 
 const fakePi = path.join(tmp, 'fake-pi.cjs');
 fs.writeFileSync(
@@ -547,6 +576,60 @@ assert.equal(rawSend(['send', 'and the second half of the answer']).status, 0);
 assert.equal(readCurrentContext(config).messageId, 'om_newer');
 fs.unlinkSync(`${outbox}.recent`);
 assert.equal(rawSend(['send', 'no newer messages now']).status, 0);
+// In a topic group a top-level send would start a new topic, so the reply and any
+// attachment hang off the message that started the turn.
+const topicEvent = feishuMessage('evt-topic', 'om_topic', 'in a topic', 1_700_000_010_000);
+topicEvent.threadId = 'omt_d4be107c616';
+writeCurrentContext(config, topicEvent);
+assert.equal(rawSend(['send', 'topic answer']).status, 0);
+assert.deepEqual(jsonl(outbox).at(-1).thread, {
+  id: 'omt_d4be107c616',
+  anchorMessageId: 'om_topic',
+});
+assert.equal(rawSend(['send', '--image', imagePath]).status, 0);
+assert.deepEqual(
+  (({ msgType, thread }) => ({ msgType, anchor: thread?.anchorMessageId }))(jsonl(outbox).at(-1)),
+  { msgType: 'image', anchor: 'om_topic' },
+);
+// A newer message advances the staleness anchor; the reply target must not move
+// with it, or the rest of the answer lands in another topic.
+fs.writeFileSync(
+  `${outbox}.recent`,
+  [
+    { messageId: 'om_newer_topic', createTime: 1_700_000_015_000, text: 'another topic' },
+    { messageId: 'om_topic', createTime: 1_700_000_010_000, text: 'in a topic' },
+  ]
+    .map((message) => JSON.stringify(message))
+    .join('\n'),
+);
+const forced = rawSend(['send', '--force', 'first half']);
+assert.equal(forced.status, 0, forced.stderr);
+assert.deepEqual(jsonl(outbox).at(-1).thread, {
+  id: 'omt_d4be107c616',
+  anchorMessageId: 'om_topic',
+});
+assert.equal(readCurrentContext(config).messageId, 'om_newer_topic');
+assert.equal(rawSend(['send', 'second half']).status, 0);
+assert.deepEqual(jsonl(outbox).at(-1).thread, {
+  id: 'omt_d4be107c616',
+  anchorMessageId: 'om_topic',
+});
+assert.equal(readCurrentContext(config).turnMessageId, 'om_topic');
+fs.unlinkSync(`${outbox}.recent`);
+
+// A topic from another input chat must not move the visible destination.
+const foreignTopic = feishuMessage('evt-foreign', 'om_foreign', 'elsewhere', 1_700_000_030_000);
+foreignTopic.threadId = 'omt_foreign';
+foreignTopic.chatId = 'oc_other';
+writeCurrentContext(config, foreignTopic);
+assert.equal(rawSend(['send', 'answer in the bound chat']).status, 0);
+assert.equal(jsonl(outbox).at(-1).thread, undefined);
+assert.equal(jsonl(outbox).at(-1).chatId, 'oc-test');
+
+// Outside a topic the same send stays in the chat stream.
+writeCurrentContext(config, feishuMessage('evt-plain', 'om_plain', 'no topic', 1_700_000_020_000));
+assert.equal(rawSend(['send', 'chat answer']).status, 0);
+assert.equal(jsonl(outbox).at(-1).thread, undefined);
 
 console.log('smoke ok', outbox);
 

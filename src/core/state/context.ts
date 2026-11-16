@@ -1,13 +1,15 @@
-import type { AppConfig, InboundEvent, RuntimeContext } from '../../types.js';
+import type { AppConfig, CurrentContext, InboundEvent } from '../../types.js';
 import { contextFields, decodeStateRow, getStateDb } from './db.js';
 import { stateDbPath } from './paths.js';
 
-export function writeCurrentContext(config: AppConfig, event: InboundEvent): RuntimeContext {
-  const context: RuntimeContext = {
+export function writeCurrentContext(config: AppConfig, event: InboundEvent): CurrentContext {
+  const context: CurrentContext = {
     chatId: event.chatId,
     eventId: event.id,
     messageId: event.messageId,
     messageCreateTime: event.createTime,
+    turnMessageId: event.messageId,
+    threadId: event.threadId,
     source: event.source,
     kind: event.kind,
     textChars: event.text.length,
@@ -16,10 +18,11 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
   };
   const row = getStateDb(config)
     .prepare(`INSERT INTO current_context
-    (singleton, chatId, eventId, messageId, messageCreateTime, source, kind, textChars, startedAt, sendCount)
-    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+    (singleton, chatId, eventId, messageId, messageCreateTime, turnMessageId, threadId, source, kind, textChars, startedAt, sendCount)
+    VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
     ON CONFLICT(singleton) DO UPDATE SET chatId=excluded.chatId, eventId=excluded.eventId,
       messageId=excluded.messageId, messageCreateTime=excluded.messageCreateTime,
+      turnMessageId=excluded.turnMessageId, threadId=excluded.threadId,
       source=excluded.source, kind=excluded.kind,
       textChars=excluded.textChars, startedAt=excluded.startedAt, sendCount=0,
       lastSentAt=NULL, contextUsage=NULL, contextUsageSource=NULL RETURNING *`)
@@ -28,34 +31,39 @@ export function writeCurrentContext(config: AppConfig, event: InboundEvent): Run
       context.eventId,
       context.messageId ?? null,
       context.messageCreateTime ?? null,
+      context.turnMessageId ?? null,
+      context.threadId ?? null,
       context.source,
       context.kind,
       context.textChars,
       context.startedAt,
     );
   if (!row) throw new Error('current context upsert returned no row');
-  return decodeStateRow<RuntimeContext>(row, contextFields);
+  return decodeStateRow<CurrentContext>(row, contextFields);
 }
 
-export function readCurrentContext(config: AppConfig): RuntimeContext {
+export function readCurrentContext(config: AppConfig): CurrentContext {
   const row = getStateDb(config).prepare('SELECT * FROM current_context WHERE singleton = 1').get();
   if (!row) throw new Error(`current message context not found: ${stateDbPath(config)}`);
-  return decodeStateRow<RuntimeContext>(row, contextFields);
+  return decodeStateRow<CurrentContext>(row, contextFields);
 }
 
-/** Moves only the staleness anchor forward; event identity and counters stay put. */
-export function advanceContextAnchor(
+/**
+ * Moves only the staleness anchor forward; event identity, the turn's own message
+ * and counters stay put, so the rest of a split reply still targets the right thread.
+ */
+export function advanceStalenessAnchor(
   config: AppConfig,
   reference: { messageId: string; messageCreateTime: number },
-): RuntimeContext {
+): CurrentContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET messageId = ?, messageCreateTime = ?
     WHERE singleton = 1 AND (messageCreateTime IS NULL OR messageCreateTime <= ?) RETURNING *`)
     .get(reference.messageId, reference.messageCreateTime, reference.messageCreateTime);
-  return row ? decodeStateRow<RuntimeContext>(row, contextFields) : readCurrentContext(config);
+  return row ? decodeStateRow<CurrentContext>(row, contextFields) : readCurrentContext(config);
 }
 
-export function recordContextSend(config: AppConfig, expectedEventId?: string): RuntimeContext {
+export function recordContextSend(config: AppConfig, expectedEventId?: string): CurrentContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET sendCount = sendCount + 1, lastSentAt = ?
     WHERE singleton = 1 ${expectedEventId === undefined ? '' : 'AND eventId = ?'} RETURNING *`)
@@ -67,7 +75,7 @@ export function recordContextUsage(
   config: AppConfig,
   usage: { text: string; source: string },
   expectedEventId?: string,
-): RuntimeContext {
+): CurrentContext {
   const row = getStateDb(config)
     .prepare(`UPDATE current_context SET contextUsage = ?, contextUsageSource = ?
     WHERE singleton = 1 ${expectedEventId === undefined ? '' : 'AND eventId = ?'} RETURNING *`)
@@ -79,8 +87,8 @@ function updatedContext(
   config: AppConfig,
   row: Record<string, unknown> | undefined,
   expectedEventId?: string,
-): RuntimeContext {
-  if (row) return decodeStateRow<RuntimeContext>(row, contextFields);
+): CurrentContext {
+  if (row) return decodeStateRow<CurrentContext>(row, contextFields);
   const context = readCurrentContext(config);
   throw new Error(
     `current message context ownership changed: expected event ${expectedEventId}, current event ${context.eventId}`,
