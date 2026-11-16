@@ -174,7 +174,7 @@ It needs parent metadata supplied by a session/cron launch or the surrounding Pi
 
 ## Prompts
 
-Every prompt carries the same short contract, on every agent backend: a run ends with `retriever send`, with `retriever return` for a child that has no automatic return, or with `NO_REPLY` for a deliberate silence. The contract also states the two rules specific to running under retriever and points at `retriever help` and the agents file instead of repeating command docs.
+Every prompt carries the same short contract, on every agent backend: a run talks to the user with `retriever send`, hands a result to the parent with `retriever return` when a child has no automatic return, or ends with `NO_REPLY` for a deliberate silence. Asking a question is a complete run; the answer arrives as the next message of the same session, with the history intact. The contract also carries the decision rules for this runtime — a short task runs here, long or self-contained work moves to a child session started with `--return`, anything that happens later or repeatedly becomes a cron, and `--wait` is never used for work that outlives the run — and points at `retriever help` and the agents file instead of repeating command docs.
 
 `<configDir>/AGENTS.md` holds identity and working rules, which the daemon creates once and never rewrites, plus a marker-delimited section of runtime documentation that follows the installed version. Rename the agent by editing the `Name:` line.
 
@@ -195,7 +195,8 @@ retriever sessions history research-1 --lines 80
 ```
 
 - Each record saves the session ID, agent selection/snapshot, working directory, status, run token, worker/supervisor PID, return settings, timestamps, last prompt/result, and log path.
-- A running session rejects another execution. This is cross-process acquisition, not an in-memory lock. Before a new run, an owner that has demonstrably disappeared is repaired as an interrupted failure; live workers, supervisors, or owned process groups remain busy. Old run tokens cannot complete newer runs.
+- Starting a run on a running session is refused. This is cross-process acquisition, not an in-memory lock. Before a new run, an owner that has demonstrably disappeared is repaired as an interrupted failure; live workers, supervisors, or owned process groups remain busy. Old run tokens cannot complete newer runs.
+- `sessions send` does not try to start that run. A message to a running session is stored against its live run token and delivered to the agent as a steering prompt: after the current tool calls, before the next model step. The run keeps its result and its completion notice. A backend without a live channel — the process adapter — rejects the message, and stale steering messages expire with their run instead of reaching the next one.
 - Async execution uses a unique prompt file and a supervised startup handshake. The watcher is resolved from the installed module, not the caller's cwd. Startup failures are recorded instead of being silently marked successful.
 - PID loss is failure/interruption, never proof of successful completion. A still-live worker, supervisor, or owned process group prevents accidental restart overlap. Unix timeout/cancellation terminates the owned group and confirms exit before releasing the run; pipe decoding preserves UTF-8 across chunks.
 - Duplicate explicit session IDs are rejected, not overwritten.
