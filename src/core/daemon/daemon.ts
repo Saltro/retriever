@@ -5,6 +5,7 @@ import type { AppConfig, InboundEvent } from '../../types.js';
 import { type AgentRunner, createMainAgentRunner } from '../agents/registry.js';
 import { type ChannelAdapter, createChannelAdapter } from '../channels/registry.js';
 import { RuntimeCronDispatcher } from '../cron/dispatch.js';
+import { logEvent } from '../log.js';
 import {
   acknowledgeParentNotification,
   claimParentNotifications,
@@ -48,7 +49,9 @@ export class PersonalDaemon {
     this.runner.start();
     this.channel
       .start((event) => this.enqueue(event))
-      .catch((error) => console.error(`[channel] ${error.stack || error}`));
+      .catch((error) =>
+        logEvent(this.config, 'channel', 'start.failed', { error: describeError(error) }),
+      );
     this.runtimeCron.start();
     this.startCallbackPoller();
   }
@@ -58,16 +61,17 @@ export class PersonalDaemon {
     if (event.source !== 'session-callback') this.deliverCallbackNotifications();
     const dedupeKey = this.dedupeKey(event);
     if (dedupeKey && this.isDuplicate(dedupeKey)) {
-      console.error(`[daemon] duplicate skipped event=${event.id} key=${dedupeKey}`);
+      logEvent(this.config, 'daemon', 'event.duplicate', { event_id: event.id, key: dedupeKey });
       return this.queue;
     }
     // A user message interrupts the running turn; wakes and callbacks wait their turn.
     if (event.kind === 'message' && this.runner.isRunning() && this.runner.capabilities.steer) {
       this.steerActiveRun(event).catch(async (error) => {
         if (dedupeKey) this.seenInbound.delete(dedupeKey);
-        console.error(
-          `[daemon] steer failed event=${event.id}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        logEvent(this.config, 'daemon', 'steer.failed', {
+          event_id: event.id,
+          error: describeError(error),
+        });
         // The runner is still busy, so a plain enqueue would be rejected and lost.
         await this.runner.waitForSettled().catch(() => undefined);
         void this.enqueueImmediate(event, dedupeKey).catch(() => undefined);
@@ -88,7 +92,10 @@ export class PersonalDaemon {
     });
     this.queue = task.catch((error) => {
       for (const key of keys) this.seenInbound.delete(key);
-      console.error(`[daemon] ${error.stack || error}`);
+      logEvent(this.config, 'daemon', 'event.failed', {
+        event_id: event.id,
+        error: describeError(error),
+      });
     });
     return task;
   }
@@ -99,7 +106,11 @@ export class PersonalDaemon {
   }
 
   private async steerActiveRun(event: InboundEvent): Promise<void> {
-    console.error(`[daemon] prompt steer event=${event.id} text_chars=${event.text.length}`);
+    const startedAt = Date.now();
+    logEvent(this.config, 'daemon', 'steer.start', {
+      event_id: event.id,
+      text_chars: event.text.length,
+    });
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     const response = await this.runner.steer(this.promptFor(event));
@@ -107,46 +118,71 @@ export class PersonalDaemon {
     // still be composing from the older message, so the anchor stays put and `send`
     // refuses once; --rebase/--force then advances it.
     if (response.disposition !== 'queued') writeCurrentContext(this.config, event);
-    console.error(`[daemon] prompt steered event=${event.id} disposition=${response.disposition}`);
+    logEvent(this.config, 'daemon', 'steer.queued', {
+      event_id: event.id,
+      disposition: response.disposition,
+    });
     this.runner
       .waitForSettled()
       .then(async () => {
         await this.refreshContextUsage(event.id);
         const context = readCurrentContext(this.config);
-        console.error(
-          `[daemon] prompt done event=${event.id} send_count=${context.sendCount || 0}`,
-        );
-        if (!context.sendCount)
-          console.error(`[daemon] reply not sent event=${event.id} reason=agent_cli_not_called`);
+        const sends = context.sendCount || 0;
+        logEvent(this.config, 'decision', 'turn.end', {
+          event_id: event.id,
+          kind: event.kind,
+          steered: true,
+          sends,
+          ms: Date.now() - startedAt,
+        });
+        if (!sends)
+          logEvent(this.config, 'daemon', 'reply.missing', {
+            event_id: event.id,
+            reason: 'agent_cli_not_called',
+          });
         await this.addReaction(event, COMPLETION_REACTION, 'completion');
       })
       .catch((error) =>
-        console.error(
-          `[daemon] steer completion warning event=${event.id}: ${error instanceof Error ? error.message : String(error)}`,
-        ),
+        logEvent(this.config, 'daemon', 'steer.completion.failed', {
+          event_id: event.id,
+          error: describeError(error),
+        }),
       );
   }
 
   async handleEvent(event: InboundEvent): Promise<void> {
     if (!event.text?.trim() && !event.attachments?.length) return;
-    console.error(
-      `[daemon] event ${event.id} kind=${event.kind} chat=${event.chatId} text_chars=${event.text.length}`,
-    );
+    const startedAt = Date.now();
+    logEvent(this.config, 'daemon', 'event.received', {
+      event_id: event.id,
+      kind: event.kind,
+      chat_id: event.chatId,
+      text_chars: event.text.length,
+    });
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     writeCurrentContext(this.config, event);
     await this.refreshContextUsage(event.id);
     const prompt = this.promptFor(event);
-    console.error(`[daemon] prompt start event=${event.id}`);
+    logEvent(this.config, 'daemon', 'prompt.start', { event_id: event.id });
     const finalText = await this.runner.promptAndWait(prompt);
     await this.refreshContextUsage(event.id);
     const context = readCurrentContext(this.config);
-    console.error(`[daemon] prompt done event=${event.id} send_count=${context.sendCount || 0}`);
-    if (!context.sendCount) {
-      if (isSilenceReply(finalText))
-        console.error(`[daemon] silent event=${event.id} reason=${SILENCE_TOKEN}`);
-      else console.error(`[daemon] reply not sent event=${event.id} reason=agent_cli_not_called`);
-    }
+    const sends = context.sendCount || 0;
+    const silent = isSilenceReply(finalText);
+    logEvent(this.config, 'decision', 'turn.end', {
+      event_id: event.id,
+      kind: event.kind,
+      source: event.source,
+      sends,
+      silent,
+      ms: Date.now() - startedAt,
+    });
+    if (!sends)
+      logEvent(this.config, 'daemon', silent ? 'reply.silent' : 'reply.missing', {
+        event_id: event.id,
+        reason: silent ? SILENCE_TOKEN : 'agent_cli_not_called',
+      });
     await this.addReaction(event, COMPLETION_REACTION, 'completion');
   }
 
@@ -154,13 +190,16 @@ export class PersonalDaemon {
     try {
       const usage = await this.runner.getContextUsage();
       recordContextUsage(this.config, usage, eventId);
-      console.error(
-        `[daemon] context usage event=${eventId} value=${JSON.stringify(usage.text)} source=${usage.source}`,
-      );
+      logEvent(this.config, 'daemon', 'context.usage', {
+        event_id: eventId,
+        value: usage.text,
+        source: usage.source,
+      });
     } catch (error) {
-      console.error(
-        `[daemon] context usage warning event=${eventId}: ${error instanceof Error ? error.message : String(error)}`,
-      );
+      logEvent(this.config, 'daemon', 'context.usage.failed', {
+        event_id: eventId,
+        error: describeError(error),
+      });
     }
   }
 
@@ -170,13 +209,20 @@ export class PersonalDaemon {
     for (const messageId of messageIds) {
       try {
         await this.channel.sender.addReaction(messageId, emojiType);
-        console.error(
-          `[daemon] reaction ok event=${event.id} message=${messageId} emoji=${emojiType} phase=${phase}`,
-        );
+        logEvent(this.config, 'daemon', 'reaction.added', {
+          event_id: event.id,
+          message_id: messageId,
+          emoji: emojiType,
+          phase,
+        });
       } catch (error) {
-        console.error(
-          `[daemon] reaction warning event=${event.id} message=${messageId} emoji=${emojiType} phase=${phase}: ${error instanceof Error ? error.message : String(error)}`,
-        );
+        logEvent(this.config, 'daemon', 'reaction.failed', {
+          event_id: event.id,
+          message_id: messageId,
+          emoji: emojiType,
+          phase,
+          error: describeError(error),
+        });
       }
     }
   }
@@ -205,16 +251,22 @@ export class PersonalDaemon {
           try {
             releaseParentNotification(this.config, notice.id);
           } catch (releaseError) {
-            console.error(`[session-callback] release failed: ${releaseError}`);
+            logEvent(this.config, 'session-callback', 'release.failed', {
+              notice_id: notice.id,
+              error: describeError(releaseError),
+            });
           }
-          console.error(
-            `[daemon] ${error instanceof Error ? error.stack || error.message : error}`,
-          );
+          logEvent(this.config, 'session-callback', 'delivery.failed', {
+            notice_id: notice.id,
+            error: describeError(error),
+          });
         }
       }
     });
     this.queue = task
-      .catch((error) => console.error(`[session-callback] ${error}`))
+      .catch((error) =>
+        logEvent(this.config, 'session-callback', 'poll.failed', { error: describeError(error) }),
+      )
       .finally(() => {
         this.callbackDeliveryScheduled = false;
       });
@@ -253,6 +305,10 @@ export class PersonalDaemon {
     this.channel.close();
     this.runner.close();
   }
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function reactionMessageIds(event: InboundEvent): string[] {

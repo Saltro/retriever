@@ -19,6 +19,7 @@ import {
   recoverRunningCrons,
   saveCronRegistry,
 } from '../src/core/cron/registry.js';
+import { logEvent } from '../src/core/log.js';
 import {
   agentProcessDetached,
   agentProcessGroupAlive,
@@ -645,6 +646,28 @@ if (worker) {
       /must not be empty/,
     );
     closeStateDb(steering);
+
+    // One event per line, split by scope, and a file past retention is dropped on first write.
+    const logs = configFor('logs');
+    const logDir = path.join(stateDir(logs), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const expired = path.join(logDir, 'daemon-2000-01-01.ndjson');
+    fs.writeFileSync(expired, '{}\n');
+    const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(expired, longAgo, longAgo);
+    logEvent(logs, 'daemon', 'prompt.done', { event_id: 'evt-log', sends: 2 });
+    logEvent(logs, 'decision', 'turn.end', { event_id: 'evt-log', sends: 2, silent: false });
+    assert.equal(fs.existsSync(expired), false, 'expired log file is removed');
+    const daemonLogs = fs.readdirSync(logDir).filter((name) => name.startsWith('daemon-'));
+    assert.equal(daemonLogs.length, 1);
+    const [line] = fs.readFileSync(path.join(logDir, daemonLogs[0]), 'utf8').trim().split('\n');
+    const logged = JSON.parse(line);
+    assert.equal(logged.scope, 'daemon');
+    assert.equal(logged.event, 'prompt.done');
+    assert.equal(logged.event_id, 'evt-log');
+    assert.equal(logged.sends, 2);
+    assert.match(logged.ts, /T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    assert.equal(fs.readdirSync(logDir).filter((name) => name.startsWith('decision-')).length, 1);
 
     const binding = configFor('binding');
     assert.equal(ensureVisibleBinding(binding, 'first-chat').chatId, 'first-chat');

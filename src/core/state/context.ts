@@ -94,3 +94,12 @@ function updatedContext(
     `current message context ownership changed: expected event ${expectedEventId}, current event ${context.eventId}`,
   );
 }
+
+/** The turn a CLI command was invoked from; absent outside a live turn. */
+export function currentEventId(config: AppConfig): string | undefined {
+  try {
+    return readCurrentContext(config).eventId;
+  } catch {
+    return undefined;
+  }
+}

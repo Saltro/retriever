@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import { loadConfig } from '../config.js';
 import { sessionAgentCapabilities, sessionAgentProfile } from '../core/agents/registry.js';
+import { logEvent } from '../core/log.js';
 import { detectParentCallback } from '../core/sessions/callbacks.js';
 import { mainSessionRecord } from '../core/sessions/main.js';
 import { enqueueSessionMessage } from '../core/sessions/messages.js';
 import { runSessionPrompt, selectSessionAgent } from '../core/sessions/service.js';
+import { currentEventId } from '../core/state/context.js';
 import { delegatedTaskPrompt } from '../prompts/delegated.js';
 import { formatTable } from './table.js';
 
@@ -120,6 +122,12 @@ async function createSession(config: AppConfig, opts: ParsedOptions): Promise<vo
   });
   record = selectSessionAgent(config, record, opts.agent, opts.cwd);
   record = insertSession(config, record);
+  logEvent(config, 'decision', 'delegate', {
+    event_id: currentEventId(config),
+    session_id: record.id,
+    auto_return: record.autoReturn,
+    waits: Boolean(opts.wait),
+  });
   if (task) record = await runSessionPrompt(config, record, task, Boolean(opts.wait));
   console.log(JSON.stringify(record, null, 2));
 }
@@ -144,6 +152,11 @@ async function sendSession(config: AppConfig, opts: ParsedOptions): Promise<void
     if (!sessionAgentCapabilities(config, record).steer)
       throw new Error(`agent backend ${backend} cannot steer into a running session: ${id}`);
     enqueueSessionMessage(config, record.id, record.runId, prompt);
+    logEvent(config, 'decision', 'steer', {
+      event_id: currentEventId(config),
+      session_id: record.id,
+      run_id: record.runId,
+    });
     console.log(JSON.stringify({ ...record, steer: 'queued' }, null, 2));
     return;
   }

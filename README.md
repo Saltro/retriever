@@ -218,9 +218,17 @@ First database access imports existing daemon JSON state transactionally and onc
 - `feishu-chat-binding.json`
 - existing `session-callbacks` notices
 
-Before deploying this migration, stop the old daemon and all old state-writing CLI/watchers. Keep the same state directory and verify the new records with CLI status/list commands. Malformed legacy state fails import with an error rather than being silently discarded. Source JSON files are retained; new code does not dual-write them. Do not keep old and new writers running together. Schema version 6 adds the message that started a turn, kept apart from the staleness anchor so a `--force` reply still targets the right topic; version 5 added the topic thread id. Schema version 4 adds the platform create time that anchors a reply to the message its turn was based on. Version 3 renamed the automatic-return field while preserving existing session settings. Old JSON fields are accepted only during import, not as CLI aliases.
+Before deploying this migration, stop the old daemon and all old state-writing CLI/watchers. Keep the same state directory and verify the new records with CLI status/list commands. Malformed legacy state fails import with an error rather than being silently discarded. Source JSON files are retained; new code does not dual-write them. Do not keep old and new writers running together. Schema version 7 adds the steering messages a running session accepts, each tied to one run token; version 6 adds the message that started a turn, kept apart from the staleness anchor so a `--force` reply still targets the right topic; version 5 added the topic thread id. Schema version 4 adds the platform create time that anchors a reply to the message its turn was based on. Version 3 renamed the automatic-return field while preserving existing session settings. Old JSON fields are accepted only during import, not as CLI aliases.
 
 Logs, config, and Pi-native history/memory/skills remain files. Runtime SQL transactions never wait on model execution, spawn, RPC, or network calls. No real cache migration is performed by the test suite.
+
+## Logs
+
+Every event is one JSON line under `<stateDir>/logs/<scope>-YYYY-MM-DD.ndjson`: a received turn, a prompt, a steering message, a reaction, a callback retry. The scope and event are short enums, the fields are flat scalars, and the timestamp is local with its offset, so `grep` and `jq` both work on the file.
+
+`decision` is the file worth reading. `turn.end` carries the event id, kind, send count, silence flag and duration; `delegate`, `steer` and `schedule` carry the session, message or cron a turn created. Joining them on `event_id` shows whether a turn answered, delegated or scheduled something.
+
+Files older than fourteen days are removed on the first write of a process. The daemon keeps printing a human-readable copy to `daemon.log`, now with a timestamp, so following a turn stays possible without `jq`.
 
 ## Runtime cron
 
