@@ -11,8 +11,6 @@ interface FeishuMessage {
   create_time?: string;
   content?: unknown;
   chat_id?: string;
-  open_chat_id?: string;
-  chat_id_v2?: string;
   /** `omt_*` in a topic group; absent on an ordinary message. */
   thread_id?: string;
 }
@@ -53,7 +51,7 @@ export function normalizeFeishuInbound(raw: unknown, source: string): InboundEve
       id: envelope.header?.event_id || message.message_id || newId(),
       source,
       kind: 'message',
-      chatId: message.chat_id || message.open_chat_id || message.chat_id_v2 || 'feishu-chat',
+      chatId: message.chat_id || 'feishu-chat',
       userId: sender?.sender_id?.open_id || sender?.sender_id?.user_id,
       messageId: message.message_id,
       createTime: createTime(message),
