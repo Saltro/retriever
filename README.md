@@ -207,7 +207,7 @@ retriever sessions history research-1 --lines 80
 
 Completion state and its requested callback are committed together in SQLite. Callback records are claimed one at a time when main actually begins delivery and acknowledged after agent processing; a waiting backlog does not consume retry attempts. A failed delivery is retried with a short backoff, up to three attempts. Interrupted claims recover on daemon startup; exhausted records remain failed for inspection. This provides bounded retry, **not exactly-once external side effects**. A crash after an agent acts but before acknowledgment can cause duplicate processing.
 
-A main turn is recorded before the agent is prompted and cleared when the turn ends. Stopping or restarting the daemon mid-turn therefore keeps the request: the next start re-delivers it in a `<resumed-turn>` that repeats the original prompt, up to two recoveries before the record is dropped. Callback notices keep their own retry queue and skip this path.
+A main turn is recorded before the agent is prompted and cleared when the turn ends, and messages steered into it are appended to that record. Stopping or restarting the daemon mid-turn therefore keeps the request: the next start re-delivers it in a `<resumed-turn>` that repeats the original prompt, up to two recoveries before the record is dropped. Recovery is queued before any channel message or due cron, so it always describes the most recent interrupted turn. Callback notices keep their own retry queue and skip this path.
 
 ## SQLite state and migration
 

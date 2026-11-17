@@ -11,6 +11,8 @@ export interface PendingTurn {
   event: InboundEvent;
   /** Prompt without the runtime contract, so recovery wraps it exactly once. */
   message: string;
+  /** Messages steered into this turn, in arrival order; they replay with it. */
+  steers: string[];
   startedAt: string;
   attempts: number;
 }
@@ -31,6 +33,7 @@ export function readPendingTurn(config: AppConfig): PendingTurn | undefined {
     return {
       event: turn.event,
       message: turn.message,
+      steers: Array.isArray(turn.steers) ? turn.steers.filter((s) => typeof s === 'string') : [],
       startedAt: turn.startedAt,
       attempts: Number.isSafeInteger(turn.attempts) ? Number(turn.attempts) : 0,
     };

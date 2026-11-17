@@ -50,6 +50,8 @@ export class PersonalDaemon {
 
   start(): void {
     this.runner.start();
+    // Recovery goes first so no producer can claim the record with a fresh turn.
+    this.resumeInterruptedTurn();
     this.channel
       .start((event) => this.enqueue(event))
       .catch((error) =>
@@ -57,7 +59,6 @@ export class PersonalDaemon {
       );
     this.runtimeCron.start();
     this.startCallbackPoller();
-    this.resumeInterruptedTurn();
   }
 
   /**
@@ -87,6 +88,7 @@ export class PersonalDaemon {
       prompt: resumedTurnPrompt(pending.message, {
         startedAt: pending.startedAt,
         channel: this.channel.label,
+        steers: pending.steers,
       }),
     }).catch((error) =>
       logEvent(this.config, 'daemon', 'turn.recovery.failed', {
@@ -144,10 +146,6 @@ export class PersonalDaemon {
     return event.prompt ?? inboundMessagePrompt(event, this.channel.label, true);
   }
 
-  private promptFor(event: InboundEvent): string {
-    return withContract(this.config, 'main', this.messageFor(event));
-  }
-
   private async steerActiveRun(event: InboundEvent): Promise<void> {
     const startedAt = Date.now();
     logEvent(this.config, 'daemon', 'steer.start', {
@@ -156,11 +154,13 @@ export class PersonalDaemon {
     });
     this.channel.bindInbound(event);
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
-    const response = await this.runner.steer(this.promptFor(event));
+    const message = this.messageFor(event);
+    const response = await this.runner.steer(withContract(this.config, 'main', message));
     // A queued steer is delivered before the next model call. Until then the agent may
     // still be composing from the older message, so the anchor stays put and `send`
     // refuses once; --rebase/--force then advances it.
     if (response.disposition !== 'queued') writeCurrentContext(this.config, event);
+    this.recordSteer(message);
     logEvent(this.config, 'daemon', 'steer.queued', {
       event_id: event.id,
       disposition: response.disposition,
@@ -240,12 +240,21 @@ export class PersonalDaemon {
   /** Records the turn before it starts, keeping the recovery count of a resumed one. */
   private trackTurn(event: InboundEvent, message: string): void {
     const pending = readPendingTurn(this.config);
+    const sameTurn = pending?.event.id === event.id;
     writePendingTurn(this.config, {
       event,
       message,
       startedAt: new Date().toISOString(),
-      attempts: pending?.event.id === event.id ? pending.attempts : 0,
+      attempts: sameTurn ? pending.attempts : 0,
+      steers: sameTurn ? pending.steers : [],
     });
+  }
+
+  /** A steer queued into the running turn has to replay with it, or the message is lost. */
+  private recordSteer(message: string): void {
+    const pending = readPendingTurn(this.config);
+    if (!pending) return;
+    writePendingTurn(this.config, { ...pending, steers: [...pending.steers, message] });
   }
 
   private async refreshContextUsage(eventId: string): Promise<void> {

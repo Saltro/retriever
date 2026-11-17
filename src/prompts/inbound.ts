@@ -29,6 +29,8 @@ export interface ResumedTurnOptions {
   /** When the interrupted attempt began. */
   startedAt: string;
   channel?: string;
+  /** Messages steered into the interrupted turn, in arrival order. */
+  steers?: string[];
   resumedAt?: Date;
 }
 
@@ -38,7 +40,7 @@ export interface ResumedTurnOptions {
  */
 export function resumedTurnPrompt(
   originalMessage: string,
-  { startedAt, channel, resumedAt = new Date() }: ResumedTurnOptions,
+  { startedAt, channel, steers = [], resumedAt = new Date() }: ResumedTurnOptions,
 ): string {
   return joinBlocks([
     element(
@@ -47,6 +49,7 @@ export function resumedTurnPrompt(
         channel,
         attempt_started_at: localTimestamp(new Date(startedAt)),
         resumed_at: localTimestamp(resumedAt),
+        steered_messages: steers.length || undefined,
         reason:
           'retriever terminated while this turn was still running: a restart, an unexpected shutdown, or a crash',
       },
@@ -57,6 +60,16 @@ export function resumedTurnPrompt(
       ].join('\n'),
     ),
     originalMessage,
+    steers.length
+      ? element(
+          'steered-messages',
+          { count: steers.length },
+          [
+            'These messages also arrived before the interruption and belong to the same turn.',
+            ...steers,
+          ].join('\n\n'),
+        )
+      : undefined,
   ]);
 }
 

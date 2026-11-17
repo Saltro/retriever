@@ -5,6 +5,7 @@ import path from 'node:path';
 import '../src/extensions/index.js';
 import type { AgentRunner } from '../src/core/agents/types.js';
 import type { ChannelAdapter } from '../src/core/channels/registry.js';
+import { saveCronRegistry } from '../src/core/cron/registry.js';
 import { PersonalDaemon } from '../src/core/daemon/daemon.js';
 import { normalizeInbound } from '../src/core/events.js';
 import { getStateDb } from '../src/core/state/db.js';
@@ -116,10 +117,51 @@ await assert.rejects(
 );
 assert.equal(readPendingTurn(config), undefined);
 
-// Recovery is bounded, so a turn that keeps killing the daemon cannot loop forever.
+// A message steered into the running turn replays with it instead of being dropped.
+const steering = recordingRunner(false);
+steering.capabilities.steer = true;
+steering.steer = async () => ({ disposition: 'queued' as const });
+let busy = false;
+steering.isRunning = () => busy;
+const firstTurn = steering.promptAndWait;
+steering.promptAndWait = (message: string) => {
+  busy = true;
+  return firstTurn(message);
+};
+const steeringDaemon = new PersonalDaemon(config, { runner: steering, channel: fakeChannel() });
+void steeringDaemon.enqueue(
+  normalizeInbound(
+    { type: 'message', id: 'evt-steered', chatId: 'chat-1', text: 'review the migration' },
+    'test',
+  ),
+);
+await until(() => steering.prompts.length === 1, 'the steered turn to start');
+void steeringDaemon.enqueue(
+  normalizeInbound(
+    { type: 'message', id: 'evt-steered-2', chatId: 'chat-1', text: 'also check the rollback' },
+    'test',
+  ),
+);
+await until(() => readPendingTurn(config)?.steers.length === 1, 'the steer to be recorded');
+assert.match(readPendingTurn(config)?.steers[0] ?? '', /also check the rollback/);
+
+const steeringRecovery = recordingRunner();
+const steeringRecoveryDaemon = new PersonalDaemon(config, {
+  runner: steeringRecovery,
+  channel: fakeChannel(),
+});
+steeringRecoveryDaemon.start();
+await until(() => steeringRecovery.prompts.length === 1, 'the steered turn to resume');
+assert.match(steeringRecovery.prompts[0], /<steered-messages count="1">/);
+assert.match(steeringRecovery.prompts[0], /review the migration/);
+assert.match(steeringRecovery.prompts[0], /also check the rollback/);
+assert.equal(readPendingTurn(config), undefined);
+steeringRecoveryDaemon.stop();
+
 writePendingTurn(config, {
   event,
   message: 'ship the release notes',
+  steers: [],
   startedAt: '2026-01-01T00:00:00.000Z',
   attempts: 2,
 });
@@ -139,5 +181,42 @@ assert.equal(
   undefined,
   'the broken record is removed',
 );
+
+// A due cron at startup must not take the recovery slot from the interrupted turn.
+const due = Date.now() - 60_000;
+saveCronRegistry(config, {
+  version: 1,
+  crons: {
+    'due-cron': {
+      id: 'due-cron',
+      prompt: 'send the weekly summary',
+      schedule: { type: 'at', at: new Date(due).toISOString() },
+      target: 'main',
+      enabled: true,
+      status: 'scheduled',
+      createdAt: new Date(due).toISOString(),
+      updatedAt: new Date(due).toISOString(),
+      nextRunAt: new Date(due).toISOString(),
+    },
+  },
+});
+writePendingTurn(config, {
+  event: normalizeInbound(
+    { type: 'message', id: 'evt-before-cron', chatId: 'chat-1', text: 'finish the report' },
+    'test',
+  ),
+  message: 'finish the report',
+  steers: [],
+  startedAt: '2026-01-01T00:00:00.000Z',
+  attempts: 0,
+});
+const ordered = recordingRunner();
+const orderedDaemon = new PersonalDaemon(config, { runner: ordered, channel: fakeChannel() });
+orderedDaemon.start();
+await until(() => ordered.prompts.length === 2, 'the recovered turn and the due cron');
+assert.match(ordered.prompts[0], /<resumed-turn/);
+assert.match(ordered.prompts[0], /finish the report/);
+assert.match(ordered.prompts[1], /send the weekly summary/);
+orderedDaemon.stop();
 
 console.log('turn recovery tests passed');
