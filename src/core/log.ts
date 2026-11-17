@@ -6,6 +6,7 @@ import { stateDir } from './state/paths.js';
 
 const RETENTION_DAYS = 14;
 const prunedDirs = new Set<string>();
+let lastWriteAt = 0;
 
 export type LogField = string | number | boolean | null | undefined;
 
@@ -38,6 +39,9 @@ export function logEvent(
   const now = new Date();
   const record: Record<string, string | number | boolean | null> = {
     ts: preciseTimestamp(now),
+    // Wall clock with sub-millisecond precision. Two events in the same millisecond,
+    // and in different scope files, are only distinguishable here.
+    at: writeClock(),
     scope: scope.replace(SCOPES, '-'),
     event,
   };
@@ -86,20 +90,32 @@ export function readLogEvents(config: AppConfig, options: ReadLogOptions = {}): 
       }
     }
   }
-  // Milliseconds keep two events written in the same second in order; the epoch
-  // comparison also survives records that were written under different offsets.
-  return records.sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
+  // `at` is the write order; the string timestamp is only for humans and is used as
+  // a fallback for records written before it existed.
+  const clock = (record: LogRecord) =>
+    typeof record.at === 'number' ? record.at : Date.parse(record.ts) || 0;
+  return records.sort((left, right) => clock(left) - clock(right));
 }
 
 /** The one rendering, shared by the stderr mirror and `retriever log`. */
 export function formatLogRecord(record: Record<string, unknown>): string {
-  const { ts, scope, event, ...fields } = record;
+  const { ts, at: _at, scope, event, ...fields } = record;
   const pairs = Object.entries(fields).map(([key, value]) => {
     if (typeof value === 'string' && /[\s"=]/.test(value)) return `${key}=${JSON.stringify(value)}`;
     if (value !== null && typeof value === 'object') return `${key}=${JSON.stringify(value)}`;
     return `${key}=${String(value)}`;
   });
   return [`${String(ts)} [${String(scope)}] ${String(event)}`, ...pairs].join(' ');
+}
+
+/**
+ * Strictly increasing per process: the wall clock alone repeats when two writes land in
+ * one tick, and the file name a record goes to must not decide its order.
+ */
+function writeClock(): number {
+  const now = performance.timeOrigin + performance.now();
+  lastWriteAt = now > lastWriteAt ? now : lastWriteAt + 0.001;
+  return lastWriteAt;
 }
 
 /** Local day for the file name, so a log file matches the timestamps inside it. */

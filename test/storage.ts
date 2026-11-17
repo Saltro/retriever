@@ -20,7 +20,7 @@ import {
   recoverRunningCrons,
   saveCronRegistry,
 } from '../src/core/cron/registry.js';
-import { logEvent } from '../src/core/log.js';
+import { logEvent, readLogEvents } from '../src/core/log.js';
 import {
   agentProcessDetached,
   agentProcessGroupAlive,
@@ -37,6 +37,7 @@ import {
   writeParentNotification,
   writeParentReturnNotification,
 } from '../src/core/sessions/callbacks.js';
+import { selectMainSession } from '../src/core/sessions/main.js';
 import {
   enqueueSessionMessage,
   expireSessionMessages,
@@ -667,13 +668,24 @@ if (worker) {
     // A command from a plain terminal must not inherit the last turn's identity.
     const turnContext = configFor('turn-context');
     writeCurrentContext(turnContext, event);
+    insertSession(
+      turnContext,
+      newSessionRecord(turnContext, { id: MAIN_SESSION_ID, autoReturn: false }),
+    );
+    insertSession(turnContext, newSessionRecord(turnContext, { id: 'child-1', autoReturn: false }));
     const savedSession = process.env.RETRIEVER_SESSION_ID;
     delete process.env.RETRIEVER_SESSION_ID;
-    assert.equal(currentEventId(turnContext), undefined);
+    assert.equal(currentEventId(turnContext), undefined, 'no session env, no attribution');
     process.env.RETRIEVER_SESSION_ID = 'child-1';
-    assert.equal(currentEventId(turnContext), undefined, 'a child never borrows main turn');
+    assert.equal(currentEventId(turnContext), undefined, 'a child never borrows the main turn');
     process.env.RETRIEVER_SESSION_ID = MAIN_SESSION_ID;
     assert.equal(currentEventId(turnContext), event.id);
+    // The main session is selectable: the record decides, not the built-in id.
+    selectMainSession(turnContext, 'child-1');
+    process.env.RETRIEVER_SESSION_ID = 'child-1';
+    assert.equal(currentEventId(turnContext), event.id, 'the selected main session is attributed');
+    process.env.RETRIEVER_SESSION_ID = MAIN_SESSION_ID;
+    assert.equal(currentEventId(turnContext), undefined, 'the previous main is a child now');
     if (savedSession === undefined) delete process.env.RETRIEVER_SESSION_ID;
     else process.env.RETRIEVER_SESSION_ID = savedSession;
 
@@ -687,6 +699,19 @@ if (worker) {
     fs.utimesSync(expired, longAgo, longAgo);
     logEvent(logs, 'daemon', 'prompt.done', { event_id: 'evt-log', sends: 2 });
     logEvent(logs, 'decision', 'turn.end', { event_id: 'evt-log', sends: 2, silent: false });
+    // Write order survives two events landing in the same millisecond, in two files.
+    const expected: string[] = [];
+    for (let index = 0; index < 20; index++) {
+      logEvent(logs, 'decision', 'turn.end', { event_id: `evt-order-${index}` });
+      logEvent(logs, 'daemon', 'event.received', { event_id: `evt-order-${index}` });
+      expected.push(`turn.end:evt-order-${index}`, `event.received:evt-order-${index}`);
+    }
+    assert.deepEqual(
+      readLogEvents(logs)
+        .map((record) => `${record.event}:${record.event_id}`)
+        .slice(-expected.length),
+      expected,
+    );
     assert.equal(fs.existsSync(expired), false, 'expired log file is removed');
     const daemonLogs = fs.readdirSync(logDir).filter((name) => name.startsWith('daemon-'));
     assert.equal(daemonLogs.length, 1);
@@ -697,6 +722,7 @@ if (worker) {
     assert.equal(logged.event_id, 'evt-log');
     assert.equal(logged.sends, 2);
     assert.match(logged.ts, /T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
+    assert.equal(typeof logged.at, 'number');
     assert.equal(fs.readdirSync(logDir).filter((name) => name.startsWith('decision-')).length, 1);
 
     const binding = configFor('binding');

@@ -1,5 +1,6 @@
-import { MAIN_SESSION_ID } from '../../config.js';
 import type { AppConfig, CurrentContext, InboundEvent } from '../../types.js';
+import { isMainSessionRecord } from '../sessions/main.js';
+import { getSession } from '../sessions/registry.js';
 import { contextFields, decodeStateRow, getStateDb } from './db.js';
 import { stateDbPath } from './paths.js';
 
@@ -101,8 +102,12 @@ export function currentEventId(config: AppConfig): string | undefined {
   // The context stays persisted after a turn and every session's CLI reads the same
   // row, so only the main session's live turn can claim it. A child would otherwise
   // borrow whichever turn main is on, and a hand-run command the last one.
-  if (process.env.RETRIEVER_SESSION_ID !== MAIN_SESSION_ID) return undefined;
+  const sessionId = process.env.RETRIEVER_SESSION_ID;
+  if (!sessionId) return undefined;
   try {
+    // The main session is selectable, so ask the registry instead of assuming the
+    // built-in default id.
+    if (!isMainSessionRecord(config, getSession(config, sessionId))) return undefined;
     return readCurrentContext(config).eventId;
   } catch {
     return undefined;

@@ -227,6 +227,8 @@ Logs, config, and Pi-native history/memory/skills remain files. Runtime SQL tran
 
 Every event is one JSON line under `<stateDir>/logs/<scope>-YYYY-MM-DD.ndjson`: a received turn, a prompt, a steering message, a reaction, a callback retry. The scope and event are short enums, the fields are flat scalars, and the timestamp is local with its offset, so `grep` and `jq` both work on the file.
 
+Each record also carries `at`, an epoch value with sub-millisecond precision. Reads sort by it, so two events in one millisecond keep their write order even when they land in different scope files; `ts` is the human timestamp.
+
 `decision` is the file worth reading. `turn.end` carries the event id, kind, send count, silence flag and duration; `delegate`, `steer` and `schedule` carry the session, message or cron a turn created. Joining them on `event_id` shows whether a turn answered, delegated or scheduled something.
 
 Files older than fourteen days are removed on the first write of a process. The daemon keeps printing a human-readable copy to `daemon.log`, now with a timestamp, so following a turn stays possible without `jq`.
