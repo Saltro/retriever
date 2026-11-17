@@ -1,3 +1,4 @@
+import { MAIN_SESSION_ID } from '../../config.js';
 import type { AppConfig, CurrentContext, InboundEvent } from '../../types.js';
 import { contextFields, decodeStateRow, getStateDb } from './db.js';
 import { stateDbPath } from './paths.js';
@@ -97,9 +98,10 @@ function updatedContext(
 
 /** The turn a CLI command was invoked from; absent outside a live turn. */
 export function currentEventId(config: AppConfig): string | undefined {
-  // The context stays persisted after a turn, so a hand-run command would otherwise
-  // be attributed to whatever event the daemon processed last.
-  if (!process.env.RETRIEVER_SESSION_ID) return undefined;
+  // The context stays persisted after a turn and every session's CLI reads the same
+  // row, so only the main session's live turn can claim it. A child would otherwise
+  // borrow whichever turn main is on, and a hand-run command the last one.
+  if (process.env.RETRIEVER_SESSION_ID !== MAIN_SESSION_ID) return undefined;
   try {
     return readCurrentContext(config).eventId;
   } catch {

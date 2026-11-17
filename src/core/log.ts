@@ -1,6 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { localTimestamp } from '../prompts/time.js';
+import { preciseTimestamp } from '../prompts/time.js';
 import type { AppConfig } from '../types.js';
 import { stateDir } from './state/paths.js';
 
@@ -37,7 +37,7 @@ export function logEvent(
 ): void {
   const now = new Date();
   const record: Record<string, string | number | boolean | null> = {
-    ts: localTimestamp(now),
+    ts: preciseTimestamp(now),
     scope: scope.replace(SCOPES, '-'),
     event,
   };
@@ -86,7 +86,9 @@ export function readLogEvents(config: AppConfig, options: ReadLogOptions = {}): 
       }
     }
   }
-  return records.sort((left, right) => left.ts.localeCompare(right.ts));
+  // Milliseconds keep two events written in the same second in order; the epoch
+  // comparison also survives records that were written under different offsets.
+  return records.sort((left, right) => Date.parse(left.ts) - Date.parse(right.ts));
 }
 
 /** The one rendering, shared by the stderr mirror and `retriever log`. */

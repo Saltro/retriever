@@ -142,6 +142,9 @@ async function sendSession(config: AppConfig, opts: ParsedOptions): Promise<void
   const prompt = await promptFromOptions(opts, 'message');
   if (!prompt) throw new Error('sessions send requires --message or --stdin');
   let record = getSession(config, id);
+  // A record can still say running after its owner died, so repair it the same way a
+  // new run would before deciding whether this message starts or steers.
+  if (record.status === 'running') record = refreshSessionStatus(config, record);
   if (record.status === 'running') {
     if (opts.wait)
       throw new Error(

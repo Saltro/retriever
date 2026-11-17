@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { MAIN_SESSION_ID } from '../src/config.js';
 import { unreadMessages } from '../src/core/channels/staleness.js';
 import {
   claimCronRun,
@@ -67,7 +68,12 @@ import {
   recordContextUsage,
   writeCurrentContext,
 } from '../src/core/state/context.js';
-import { closeStateDb, getStateDb, stateTransaction } from '../src/core/state/db.js';
+import {
+  closeStateDb,
+  getStateDb,
+  SCHEMA_VERSION,
+  stateTransaction,
+} from '../src/core/state/db.js';
 import { defaultStateDir, stateDbPath, stateDir } from '../src/core/state/paths.js';
 import type { AppConfig, InboundEvent } from '../src/types.js';
 
@@ -204,7 +210,10 @@ if (worker) {
     assert.equal(getCron(legacy, 'legacy-cron').prompt, 'wake');
     assert.equal(readVisibleBinding(legacy)?.chatId, 'visible-fixed');
     assert.deepEqual(listParentNotifications(legacy), [legacyNotice]);
-    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 6);
+    assert.equal(
+      getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version,
+      SCHEMA_VERSION,
+    );
     const contextColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(current_context)')
       .all()
@@ -335,8 +344,8 @@ if (worker) {
       const migratedDb = getStateDb(migration);
       assert.equal(
         migratedDb.prepare('PRAGMA user_version').get()?.user_version,
-        6,
-        `v${version} migrates to v6`,
+        SCHEMA_VERSION,
+        `v${version} migrates to v${SCHEMA_VERSION}`,
       );
       const migratedColumns = migratedDb
         .prepare('PRAGMA table_info(sessions)')
@@ -395,8 +404,8 @@ if (worker) {
       closeStateDb(migration);
       assert.equal(
         getStateDb(migration).prepare('PRAGMA user_version').get()?.user_version,
-        6,
-        'v6 schema reopens without repeated ALTER',
+        SCHEMA_VERSION,
+        'the current schema reopens without repeated ALTER',
       );
       for (const value of [0, 1])
         assert.equal(getSession(migration, migratedIds[value]).autoReturn, Boolean(value));
@@ -661,7 +670,9 @@ if (worker) {
     const savedSession = process.env.RETRIEVER_SESSION_ID;
     delete process.env.RETRIEVER_SESSION_ID;
     assert.equal(currentEventId(turnContext), undefined);
-    process.env.RETRIEVER_SESSION_ID = 'main';
+    process.env.RETRIEVER_SESSION_ID = 'child-1';
+    assert.equal(currentEventId(turnContext), undefined, 'a child never borrows main turn');
+    process.env.RETRIEVER_SESSION_ID = MAIN_SESSION_ID;
     assert.equal(currentEventId(turnContext), event.id);
     if (savedSession === undefined) delete process.env.RETRIEVER_SESSION_ID;
     else process.env.RETRIEVER_SESSION_ID = savedSession;
@@ -685,7 +696,7 @@ if (worker) {
     assert.equal(logged.event, 'prompt.done');
     assert.equal(logged.event_id, 'evt-log');
     assert.equal(logged.sends, 2);
-    assert.match(logged.ts, /T\d{2}:\d{2}:\d{2}[+-]\d{2}:\d{2}$/);
+    assert.match(logged.ts, /T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
     assert.equal(fs.readdirSync(logDir).filter((name) => name.startsWith('decision-')).length, 1);
 
     const binding = configFor('binding');

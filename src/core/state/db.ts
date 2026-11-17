@@ -6,7 +6,7 @@ import type { RuntimeCronRecord } from '../cron/registry.js';
 import { normalizeRuntimeCron } from '../cron/registry.js';
 import { stateDbPath, stateDir } from './paths.js';
 
-const SCHEMA_VERSION = 7;
+export const SCHEMA_VERSION = 7;
 const connections = new Map<string, DatabaseSync>();
 type FieldKind = 'text' | 'number' | 'boolean' | 'json';
 export type StateFields = Record<string, FieldKind>;
