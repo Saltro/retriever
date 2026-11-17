@@ -8,6 +8,8 @@ import {
   type RuntimeCronRecord,
   type RuntimeCronTarget,
 } from '../core/cron/registry.js';
+import { logEvent } from '../core/log.js';
+import { currentEventId } from '../core/state/context.js';
 import { formatTable } from './table.js';
 
 interface ParsedOptions {
@@ -99,22 +101,23 @@ export async function runCronCli(args: string[]): Promise<void> {
     const schedule = scheduleFromOptions(opts);
     if (!schedule) throw new Error('cron create requires --cron or --at');
     if (loadCronRegistry(config).crons[opts.id]) throw new Error(`cron already exists: ${opts.id}`);
-    console.log(
-      JSON.stringify(
-        putCron(
-          config,
-          makeRuntimeCron({
-            id: opts.id,
-            prompt,
-            schedule,
-            target: opts.target,
-            enabled: opts.enabled,
-          }),
-        ),
-        null,
-        2,
-      ),
+    const record = putCron(
+      config,
+      makeRuntimeCron({
+        id: opts.id,
+        prompt,
+        schedule,
+        target: opts.target,
+        enabled: opts.enabled,
+      }),
     );
+    logEvent(config, 'decision', 'schedule', {
+      event_id: currentEventId(config),
+      cron_id: record.id,
+      target: record.target,
+      schedule: record.schedule.type,
+    });
+    console.log(JSON.stringify(record, null, 2));
   } else if (command === 'list') {
     const records = Object.values(loadCronRegistry(config).crons).sort((a, b) =>
       a.id.localeCompare(b.id),

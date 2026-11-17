@@ -60,12 +60,17 @@ export const COMMANDS: CommandHelp[] = [
   },
   {
     name: 'sessions send',
-    summary: 'Send a message to an existing session, continuing its conversation.',
+    summary: 'Send a message to an existing session: a new run when idle, a steer when running.',
     usage: [
       'retriever sessions send <id> [--message <text>|--stdin] [--wait] [--return|--no-return]',
     ],
-    notes: ['A session that is already running rejects a new prompt.'],
-    output: 'The updated session record as JSON.',
+    notes: [
+      'An idle session starts a new run.',
+      'A running session takes the message as a steering prompt, delivered after its current tool calls and before the next model step.',
+      'A backend without a live channel rejects a message while the session runs.',
+      '--wait blocks until a new run finishes; it does not apply to a steer.',
+    ],
+    output: 'The updated session record as JSON; a steered message reports `steer: "queued"`.',
   },
   {
     name: 'sessions list',
@@ -107,6 +112,21 @@ export const COMMANDS: CommandHelp[] = [
       'target=main wakes the main session; target=new starts a child session; target=session:<id> reuses one.',
     ],
     output: 'The cron record as JSON for mutations; a table for `list`.',
+  },
+  {
+    name: 'log',
+    summary: 'Print recorded events, newest last.',
+    usage: [
+      'retriever log [scope...] [--lines <n>] [--days <n>] [--event <prefix>] [--event-id <id>] [--json]',
+    ],
+    notes: [
+      'Reads <stateDir>/logs/<scope>-YYYY-MM-DD.ndjson. Scopes default to every file; the usual ones are daemon, decision and session-callback.',
+      '--event matches a prefix, so --event prompt shows prompt.start and prompt.done.',
+      '--days covers the previous local days, today included; the default is today only.',
+      '--json prints the records untouched, for jq or a diff.',
+    ],
+    output:
+      'One line per event, or a JSON array with --json. Nothing on stdout for an empty selection.',
   },
   {
     name: 'bind',

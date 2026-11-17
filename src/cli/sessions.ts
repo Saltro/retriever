@@ -1,8 +1,12 @@
 import fs from 'node:fs';
 import { loadConfig } from '../config.js';
+import { sessionAgentCapabilities, sessionAgentProfile } from '../core/agents/registry.js';
+import { logEvent } from '../core/log.js';
 import { detectParentCallback } from '../core/sessions/callbacks.js';
 import { mainSessionRecord } from '../core/sessions/main.js';
+import { enqueueSessionMessage } from '../core/sessions/messages.js';
 import { runSessionPrompt, selectSessionAgent } from '../core/sessions/service.js';
+import { currentEventId } from '../core/state/context.js';
 import { delegatedTaskPrompt } from '../prompts/delegated.js';
 import { formatTable } from './table.js';
 
@@ -118,6 +122,12 @@ async function createSession(config: AppConfig, opts: ParsedOptions): Promise<vo
   });
   record = selectSessionAgent(config, record, opts.agent, opts.cwd);
   record = insertSession(config, record);
+  logEvent(config, 'decision', 'delegate', {
+    event_id: currentEventId(config),
+    session_id: record.id,
+    auto_return: record.autoReturn,
+    waits: Boolean(opts.wait),
+  });
   if (task) record = await runSessionPrompt(config, record, task, Boolean(opts.wait));
   console.log(JSON.stringify(record, null, 2));
 }
@@ -132,6 +142,28 @@ async function sendSession(config: AppConfig, opts: ParsedOptions): Promise<void
   const prompt = await promptFromOptions(opts, 'message');
   if (!prompt) throw new Error('sessions send requires --message or --stdin');
   let record = getSession(config, id);
+  // A record can still say running after its owner died, so repair it the same way a
+  // new run would before deciding whether this message starts or steers.
+  if (record.status === 'running') record = refreshSessionStatus(config, record);
+  if (record.status === 'running') {
+    if (opts.wait)
+      throw new Error(
+        '--wait does not apply to a running session: the message is steered, not run',
+      );
+    if (!record.runId) throw new Error(`session is running without a run token: ${id}`);
+    const { backend } = sessionAgentProfile(config, record).profile;
+    if (!sessionAgentCapabilities(config, record).steer)
+      throw new Error(`agent backend ${backend} cannot steer into a running session: ${id}`);
+    const queued = enqueueSessionMessage(config, record.id, record.runId, prompt);
+    if (!queued) throw new Error(`session finished before the message could be steered: ${id}`);
+    logEvent(config, 'decision', 'steer', {
+      event_id: currentEventId(config),
+      session_id: record.id,
+      run_id: record.runId,
+    });
+    console.log(JSON.stringify({ ...record, steer: 'queued' }, null, 2));
+    return;
+  }
   if (opts.autoReturn !== undefined) record.autoReturn = opts.autoReturn;
   record.parentCallback = detectParentCallback(config) ?? record.parentCallback;
   const task = delegatedTaskPrompt(prompt, {

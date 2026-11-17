@@ -15,6 +15,13 @@ export function localTimestamp(date: Date = new Date()): string {
   return `${ymd}T${hms}${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
 }
 
+/** The same wall clock with milliseconds, for logs where two events share a second. */
+export function preciseTimestamp(date: Date = new Date()): string {
+  const whole = localTimestamp(date);
+  const millis = String(date.getMilliseconds()).padStart(3, '0');
+  return `${whole.slice(0, 19)}.${millis}${whole.slice(19)}`;
+}
+
 /** Reference clock for scheduled runs, where the local wall clock alone is ambiguous. */
 export function utcTimestamp(date: Date = new Date()): string {
   return date.toISOString();

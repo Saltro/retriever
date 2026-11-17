@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { fileURLToPath } from 'node:url';
+import { MAIN_SESSION_ID } from '../src/config.js';
 import { unreadMessages } from '../src/core/channels/staleness.js';
 import {
   claimCronRun,
@@ -19,6 +20,7 @@ import {
   recoverRunningCrons,
   saveCronRegistry,
 } from '../src/core/cron/registry.js';
+import { logEvent, readLogEvents } from '../src/core/log.js';
 import {
   agentProcessDetached,
   agentProcessGroupAlive,
@@ -35,6 +37,13 @@ import {
   writeParentNotification,
   writeParentReturnNotification,
 } from '../src/core/sessions/callbacks.js';
+import { selectMainSession } from '../src/core/sessions/main.js';
+import {
+  enqueueSessionMessage,
+  expireSessionMessages,
+  markSessionMessageDelivered,
+  pendingSessionMessages,
+} from '../src/core/sessions/messages.js';
 import {
   claimSessionRun,
   finishSessionRun,
@@ -54,12 +63,18 @@ import {
   writeVisibleBinding,
 } from '../src/core/state/binding.js';
 import {
+  currentEventId,
   readCurrentContext,
   recordContextSend,
   recordContextUsage,
   writeCurrentContext,
 } from '../src/core/state/context.js';
-import { closeStateDb, getStateDb, stateTransaction } from '../src/core/state/db.js';
+import {
+  closeStateDb,
+  getStateDb,
+  SCHEMA_VERSION,
+  stateTransaction,
+} from '../src/core/state/db.js';
 import { defaultStateDir, stateDbPath, stateDir } from '../src/core/state/paths.js';
 import type { AppConfig, InboundEvent } from '../src/types.js';
 
@@ -196,7 +211,10 @@ if (worker) {
     assert.equal(getCron(legacy, 'legacy-cron').prompt, 'wake');
     assert.equal(readVisibleBinding(legacy)?.chatId, 'visible-fixed');
     assert.deepEqual(listParentNotifications(legacy), [legacyNotice]);
-    assert.equal(getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version, 6);
+    assert.equal(
+      getStateDb(legacy).prepare('PRAGMA user_version').get()?.user_version,
+      SCHEMA_VERSION,
+    );
     const contextColumns = getStateDb(legacy)
       .prepare('PRAGMA table_info(current_context)')
       .all()
@@ -327,8 +345,8 @@ if (worker) {
       const migratedDb = getStateDb(migration);
       assert.equal(
         migratedDb.prepare('PRAGMA user_version').get()?.user_version,
-        6,
-        `v${version} migrates to v6`,
+        SCHEMA_VERSION,
+        `v${version} migrates to v${SCHEMA_VERSION}`,
       );
       const migratedColumns = migratedDb
         .prepare('PRAGMA table_info(sessions)')
@@ -387,8 +405,8 @@ if (worker) {
       closeStateDb(migration);
       assert.equal(
         getStateDb(migration).prepare('PRAGMA user_version').get()?.user_version,
-        6,
-        'v6 schema reopens without repeated ALTER',
+        SCHEMA_VERSION,
+        'the current schema reopens without repeated ALTER',
       );
       for (const value of [0, 1])
         assert.equal(getSession(migration, migratedIds[value]).autoReturn, Boolean(value));
@@ -618,6 +636,94 @@ if (worker) {
     assert.equal(interrupted.runId, undefined);
     assert.equal(interrupted.pid, undefined);
     if (agentProcessDetached) await testOrphanedGroup(sessions);
+
+    // Steering messages belong to one run token, so a stale note never reaches the next run.
+    const steering = configFor('steering');
+    insertSession(steering, newSessionRecord(steering, { id: 'busy', autoReturn: false }));
+    const running = claimSessionRun(steering, getSession(steering, 'busy'), 'run-1');
+    assert.equal(enqueueSessionMessage(steering, 'busy', 'run-2', 'stale note'), undefined);
+    const first = enqueueSessionMessage(steering, 'busy', running.runId!, '  steer left  ');
+    assert.ok(first);
+    assert.equal(first.message, 'steer left');
+    assert.equal(pendingSessionMessages(steering, 'busy', 'run-2').length, 0);
+    assert.deepEqual(
+      pendingSessionMessages(steering, 'busy', running.runId!).map((item) => item.message),
+      ['steer left'],
+    );
+    assert.equal(markSessionMessageDelivered(steering, first.id), true);
+    assert.equal(markSessionMessageDelivered(steering, first.id), false);
+    assert.equal(pendingSessionMessages(steering, 'busy', running.runId!).length, 0);
+    enqueueSessionMessage(steering, 'busy', running.runId!, 'second note');
+    assert.equal(expireSessionMessages(steering, 'busy', running.runId!), 1);
+    assert.equal(pendingSessionMessages(steering, 'busy', running.runId!).length, 0);
+    assert.throws(
+      () => enqueueSessionMessage(steering, 'busy', running.runId!, '   '),
+      /must not be empty/,
+    );
+    // A run that ended while the caller was reading its status must not swallow the note.
+    finishSessionRun(steering, 'busy', running.runId!, { status: 'completed' });
+    assert.equal(enqueueSessionMessage(steering, 'busy', running.runId!, 'too late'), undefined);
+    closeStateDb(steering);
+
+    // A command from a plain terminal must not inherit the last turn's identity.
+    const turnContext = configFor('turn-context');
+    writeCurrentContext(turnContext, event);
+    insertSession(
+      turnContext,
+      newSessionRecord(turnContext, { id: MAIN_SESSION_ID, autoReturn: false }),
+    );
+    insertSession(turnContext, newSessionRecord(turnContext, { id: 'child-1', autoReturn: false }));
+    const savedSession = process.env.RETRIEVER_SESSION_ID;
+    delete process.env.RETRIEVER_SESSION_ID;
+    assert.equal(currentEventId(turnContext), undefined, 'no session env, no attribution');
+    process.env.RETRIEVER_SESSION_ID = 'child-1';
+    assert.equal(currentEventId(turnContext), undefined, 'a child never borrows the main turn');
+    process.env.RETRIEVER_SESSION_ID = MAIN_SESSION_ID;
+    assert.equal(currentEventId(turnContext), event.id);
+    // The main session is selectable: the record decides, not the built-in id.
+    selectMainSession(turnContext, 'child-1');
+    process.env.RETRIEVER_SESSION_ID = 'child-1';
+    assert.equal(currentEventId(turnContext), event.id, 'the selected main session is attributed');
+    process.env.RETRIEVER_SESSION_ID = MAIN_SESSION_ID;
+    assert.equal(currentEventId(turnContext), undefined, 'the previous main is a child now');
+    if (savedSession === undefined) delete process.env.RETRIEVER_SESSION_ID;
+    else process.env.RETRIEVER_SESSION_ID = savedSession;
+
+    // One event per line, split by scope, and a file past retention is dropped on first write.
+    const logs = configFor('logs');
+    const logDir = path.join(stateDir(logs), 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const expired = path.join(logDir, 'daemon-2000-01-01.ndjson');
+    fs.writeFileSync(expired, '{}\n');
+    const longAgo = new Date(Date.now() - 40 * 24 * 60 * 60 * 1000);
+    fs.utimesSync(expired, longAgo, longAgo);
+    logEvent(logs, 'daemon', 'prompt.done', { event_id: 'evt-log', sends: 2 });
+    logEvent(logs, 'decision', 'turn.end', { event_id: 'evt-log', sends: 2, silent: false });
+    // Write order survives two events landing in the same millisecond, in two files.
+    const expected: string[] = [];
+    for (let index = 0; index < 20; index++) {
+      logEvent(logs, 'decision', 'turn.end', { event_id: `evt-order-${index}` });
+      logEvent(logs, 'daemon', 'event.received', { event_id: `evt-order-${index}` });
+      expected.push(`turn.end:evt-order-${index}`, `event.received:evt-order-${index}`);
+    }
+    assert.deepEqual(
+      readLogEvents(logs)
+        .map((record) => `${record.event}:${record.event_id}`)
+        .slice(-expected.length),
+      expected,
+    );
+    assert.equal(fs.existsSync(expired), false, 'expired log file is removed');
+    const daemonLogs = fs.readdirSync(logDir).filter((name) => name.startsWith('daemon-'));
+    assert.equal(daemonLogs.length, 1);
+    const [line] = fs.readFileSync(path.join(logDir, daemonLogs[0]), 'utf8').trim().split('\n');
+    const logged = JSON.parse(line);
+    assert.equal(logged.scope, 'daemon');
+    assert.equal(logged.event, 'prompt.done');
+    assert.equal(logged.event_id, 'evt-log');
+    assert.equal(logged.sends, 2);
+    assert.match(logged.ts, /T\d{2}:\d{2}:\d{2}\.\d{3}[+-]\d{2}:\d{2}$/);
+    assert.equal(typeof logged.at, 'number');
+    assert.equal(fs.readdirSync(logDir).filter((name) => name.startsWith('decision-')).length, 1);
 
     const binding = configFor('binding');
     assert.equal(ensureVisibleBinding(binding, 'first-chat').chatId, 'first-chat');
