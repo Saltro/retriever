@@ -178,7 +178,7 @@ Every prompt carries the same short contract, on every agent backend: a run talk
 
 `<configDir>/AGENTS.md` holds identity and working rules, which the daemon creates once and never rewrites, plus a marker-delimited section of runtime documentation that follows the installed version. Rename the agent by editing the `Name:` line.
 
-Event templates are XML and escape their bodies: `<inbound-message>` for a channel message, `<scheduled-wakeup>` for a cron fire, `<delegated-task>` for a child assignment, and `<child-session>` with an `<action>` block for a completion notice. Times are local with an offset, and a scheduled wake says explicitly that it is not a user message.
+Event templates are XML and escape their bodies: `<inbound-message>` for a channel message, `<scheduled-wakeup>` for a cron fire, `<delegated-task>` for a child assignment, `<child-session>` with an `<action>` block for a completion notice, and `<resumed-turn>` for a turn retriever terminated mid-flight, carrying when that attempt started and when it resumed. Times are local with an offset, and a scheduled wake says explicitly that it is not a user message.
 
 `retriever help [command]` is the authoritative description of the tool surface.
 
@@ -206,6 +206,8 @@ retriever sessions history research-1 --lines 80
 - Without a flag, automatic return defaults on only if `PI_SESSION_ID` or `PI_SESSION_FILE` is present. Outside Pi it defaults off.
 
 Completion state and its requested callback are committed together in SQLite. Callback records are claimed one at a time when main actually begins delivery and acknowledged after agent processing; a waiting backlog does not consume retry attempts. A failed delivery is retried with a short backoff, up to three attempts. Interrupted claims recover on daemon startup; exhausted records remain failed for inspection. This provides bounded retry, **not exactly-once external side effects**. A crash after an agent acts but before acknowledgment can cause duplicate processing.
+
+A main turn is recorded before the agent is prompted and cleared when the turn ends. Stopping or restarting the daemon mid-turn therefore keeps the request: the next start re-delivers it in a `<resumed-turn>` that repeats the original prompt, up to two recoveries before the record is dropped. Callback notices keep their own retry queue and skip this path.
 
 ## SQLite state and migration
 

@@ -1,4 +1,4 @@
-import { inboundMessagePrompt } from '../../prompts/inbound.js';
+import { inboundMessagePrompt, resumedTurnPrompt } from '../../prompts/inbound.js';
 import { isSilenceReply, SILENCE_TOKEN } from '../../prompts/instructions.js';
 import { withContract } from '../../prompts/system.js';
 import type { AppConfig, InboundEvent } from '../../types.js';
@@ -14,6 +14,7 @@ import {
   releaseParentNotification,
 } from '../sessions/callbacks.js';
 import { readCurrentContext, recordContextUsage, writeCurrentContext } from '../state/context.js';
+import { clearPendingTurn, readPendingTurn, writePendingTurn } from '../state/turn.js';
 
 export interface DaemonOptions {
   runner?: AgentRunner;
@@ -24,6 +25,8 @@ const DEDUPE_TTL_MS = 24 * 60 * 60 * 1000;
 const DEDUPE_MAX_KEYS = 1000;
 const PROCESSING_REACTION = 'OK';
 const COMPLETION_REACTION = 'DONE';
+/** A turn that dies with its daemon is retried this many times before it is dropped. */
+const MAX_TURN_RECOVERIES = 2;
 
 export class PersonalDaemon {
   private runner: AgentRunner;
@@ -54,6 +57,43 @@ export class PersonalDaemon {
       );
     this.runtimeCron.start();
     this.startCallbackPoller();
+    this.resumeInterruptedTurn();
+  }
+
+  /**
+   * A turn the previous process lost mid-flight is the only record of work the user
+   * asked for, so hand it back to the agent instead of waiting for a new message.
+   */
+  private resumeInterruptedTurn(): void {
+    const pending = readPendingTurn(this.config);
+    if (!pending) return;
+    const attempts = pending.attempts + 1;
+    if (attempts > MAX_TURN_RECOVERIES) {
+      clearPendingTurn(this.config);
+      logEvent(this.config, 'daemon', 'turn.recovery.dropped', {
+        event_id: pending.event.id,
+        attempts: pending.attempts,
+      });
+      return;
+    }
+    writePendingTurn(this.config, { ...pending, attempts });
+    logEvent(this.config, 'daemon', 'turn.recovery.start', {
+      event_id: pending.event.id,
+      attempts,
+      started_at: pending.startedAt,
+    });
+    this.enqueue({
+      ...pending.event,
+      prompt: resumedTurnPrompt(pending.message, {
+        startedAt: pending.startedAt,
+        channel: this.channel.label,
+      }),
+    }).catch((error) =>
+      logEvent(this.config, 'daemon', 'turn.recovery.failed', {
+        event_id: pending.event.id,
+        error: describeError(error),
+      }),
+    );
   }
 
   enqueue(event: InboundEvent): Promise<void> {
@@ -100,9 +140,12 @@ export class PersonalDaemon {
     return task;
   }
 
+  private messageFor(event: InboundEvent): string {
+    return event.prompt ?? inboundMessagePrompt(event, this.channel.label, true);
+  }
+
   private promptFor(event: InboundEvent): string {
-    const message = event.prompt ?? inboundMessagePrompt(event, this.channel.label, true);
-    return withContract(this.config, 'main', message);
+    return withContract(this.config, 'main', this.messageFor(event));
   }
 
   private async steerActiveRun(event: InboundEvent): Promise<void> {
@@ -163,9 +206,17 @@ export class PersonalDaemon {
     await this.addReaction(event, PROCESSING_REACTION, 'processing');
     writeCurrentContext(this.config, event);
     await this.refreshContextUsage(event.id);
-    const prompt = this.promptFor(event);
+    const message = this.messageFor(event);
     logEvent(this.config, 'daemon', 'prompt.start', { event_id: event.id });
-    const finalText = await this.runner.promptAndWait(prompt);
+    // Callbacks already recover through parent_notifications.
+    const resumable = event.source !== 'session-callback';
+    if (resumable) this.trackTurn(event, message);
+    let finalText: string;
+    try {
+      finalText = await this.runner.promptAndWait(withContract(this.config, 'main', message));
+    } finally {
+      if (resumable) clearPendingTurn(this.config);
+    }
     await this.refreshContextUsage(event.id);
     const context = readCurrentContext(this.config);
     const sends = context.sendCount || 0;
@@ -184,6 +235,17 @@ export class PersonalDaemon {
         reason: silent ? SILENCE_TOKEN : 'agent_cli_not_called',
       });
     await this.addReaction(event, COMPLETION_REACTION, 'completion');
+  }
+
+  /** Records the turn before it starts, keeping the recovery count of a resumed one. */
+  private trackTurn(event: InboundEvent, message: string): void {
+    const pending = readPendingTurn(this.config);
+    writePendingTurn(this.config, {
+      event,
+      message,
+      startedAt: new Date().toISOString(),
+      attempts: pending?.event.id === event.id ? pending.attempts : 0,
+    });
   }
 
   private async refreshContextUsage(eventId: string): Promise<void> {
