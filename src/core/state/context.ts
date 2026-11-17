@@ -97,6 +97,9 @@ function updatedContext(
 
 /** The turn a CLI command was invoked from; absent outside a live turn. */
 export function currentEventId(config: AppConfig): string | undefined {
+  // The context stays persisted after a turn, so a hand-run command would otherwise
+  // be attributed to whatever event the daemon processed last.
+  if (!process.env.RETRIEVER_SESSION_ID) return undefined;
   try {
     return readCurrentContext(config).eventId;
   } catch {

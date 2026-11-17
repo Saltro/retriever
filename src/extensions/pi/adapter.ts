@@ -29,7 +29,8 @@ export const piAdapter: AgentAdapter = {
       record,
       bin: profile.bin || config.extensions.pi.bin,
       extraArgs: profile.extraArgs || [],
-      settledTimeoutMs: profile.timeoutMs,
+      // `timeoutMs` is the RPC response deadline, exactly as it is for the main runner.
+      commandTimeoutMs: profile.timeoutMs,
     });
     return Object.assign(runner, {
       capabilities: { prompt: true, steer: true, history: true, contextUsage: true },

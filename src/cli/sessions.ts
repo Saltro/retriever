@@ -151,7 +151,8 @@ async function sendSession(config: AppConfig, opts: ParsedOptions): Promise<void
     const { backend } = sessionAgentProfile(config, record).profile;
     if (!sessionAgentCapabilities(config, record).steer)
       throw new Error(`agent backend ${backend} cannot steer into a running session: ${id}`);
-    enqueueSessionMessage(config, record.id, record.runId, prompt);
+    const queued = enqueueSessionMessage(config, record.id, record.runId, prompt);
+    if (!queued) throw new Error(`session finished before the message could be steered: ${id}`);
     logEvent(config, 'decision', 'steer', {
       event_id: currentEventId(config),
       session_id: record.id,

@@ -39,7 +39,7 @@ export function enqueueSessionMessage(
   runId: string,
   message: string,
   now = new Date(),
-): SessionMessage {
+): SessionMessage | undefined {
   const record: SessionMessage = {
     id: randomUUID(),
     sessionId,
@@ -48,12 +48,20 @@ export function enqueueSessionMessage(
     createdAt: now.toISOString(),
   };
   if (!record.message) throw new Error('session message must not be empty');
-  getStateDb(config)
-    .prepare(
+  const db = getStateDb(config);
+  const queued = stateTransaction(db, () => {
+    // The run can finish between the caller reading its status and this insert; a row
+    // written after that would be reported queued and never delivered.
+    const session = db.prepare('SELECT status, runId FROM sessions WHERE id = ?').get(sessionId) as
+      | { status?: unknown; runId?: unknown }
+      | undefined;
+    if (session?.status !== 'running' || session.runId !== runId) return false;
+    db.prepare(
       'INSERT INTO session_messages(id, sessionId, runId, message, createdAt, status) VALUES (?, ?, ?, ?, ?, ?)',
-    )
-    .run(record.id, record.sessionId, record.runId, record.message, record.createdAt, 'pending');
-  return record;
+    ).run(record.id, record.sessionId, record.runId, record.message, record.createdAt, 'pending');
+    return true;
+  });
+  return queued ? record : undefined;
 }
 
 /** Oldest first: an agent that sent three notes gets them in the order it wrote them. */

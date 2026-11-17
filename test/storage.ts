@@ -61,6 +61,7 @@ import {
   writeVisibleBinding,
 } from '../src/core/state/binding.js';
 import {
+  currentEventId,
   readCurrentContext,
   recordContextSend,
   recordContextUsage,
@@ -628,24 +629,42 @@ if (worker) {
 
     // Steering messages belong to one run token, so a stale note never reaches the next run.
     const steering = configFor('steering');
-    const first = enqueueSessionMessage(steering, 'busy', 'run-1', '  steer left  ');
+    insertSession(steering, newSessionRecord(steering, { id: 'busy', autoReturn: false }));
+    const running = claimSessionRun(steering, getSession(steering, 'busy'), 'run-1');
+    assert.equal(enqueueSessionMessage(steering, 'busy', 'run-2', 'stale note'), undefined);
+    const first = enqueueSessionMessage(steering, 'busy', running.runId!, '  steer left  ');
+    assert.ok(first);
     assert.equal(first.message, 'steer left');
     assert.equal(pendingSessionMessages(steering, 'busy', 'run-2').length, 0);
     assert.deepEqual(
-      pendingSessionMessages(steering, 'busy', 'run-1').map((item) => item.message),
+      pendingSessionMessages(steering, 'busy', running.runId!).map((item) => item.message),
       ['steer left'],
     );
     assert.equal(markSessionMessageDelivered(steering, first.id), true);
     assert.equal(markSessionMessageDelivered(steering, first.id), false);
-    assert.equal(pendingSessionMessages(steering, 'busy', 'run-1').length, 0);
-    enqueueSessionMessage(steering, 'busy', 'run-1', 'second note');
-    assert.equal(expireSessionMessages(steering, 'busy', 'run-1'), 1);
-    assert.equal(pendingSessionMessages(steering, 'busy', 'run-1').length, 0);
+    assert.equal(pendingSessionMessages(steering, 'busy', running.runId!).length, 0);
+    enqueueSessionMessage(steering, 'busy', running.runId!, 'second note');
+    assert.equal(expireSessionMessages(steering, 'busy', running.runId!), 1);
+    assert.equal(pendingSessionMessages(steering, 'busy', running.runId!).length, 0);
     assert.throws(
-      () => enqueueSessionMessage(steering, 'busy', 'run-1', '   '),
+      () => enqueueSessionMessage(steering, 'busy', running.runId!, '   '),
       /must not be empty/,
     );
+    // A run that ended while the caller was reading its status must not swallow the note.
+    finishSessionRun(steering, 'busy', running.runId!, { status: 'completed' });
+    assert.equal(enqueueSessionMessage(steering, 'busy', running.runId!, 'too late'), undefined);
     closeStateDb(steering);
+
+    // A command from a plain terminal must not inherit the last turn's identity.
+    const turnContext = configFor('turn-context');
+    writeCurrentContext(turnContext, event);
+    const savedSession = process.env.RETRIEVER_SESSION_ID;
+    delete process.env.RETRIEVER_SESSION_ID;
+    assert.equal(currentEventId(turnContext), undefined);
+    process.env.RETRIEVER_SESSION_ID = 'main';
+    assert.equal(currentEventId(turnContext), event.id);
+    if (savedSession === undefined) delete process.env.RETRIEVER_SESSION_ID;
+    else process.env.RETRIEVER_SESSION_ID = savedSession;
 
     // One event per line, split by scope, and a file past retention is dropped on first write.
     const logs = configFor('logs');
